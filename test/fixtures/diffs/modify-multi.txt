@@ -1,0 +1,22 @@
+diff --git a/mh.txt b/mh.txt
+index bab081fdb7..d303125235 100644
+--- a/mh.txt
++++ b/mh.txt
+@@ -2,7 +2,7 @@
+ line 2
+ line 3
+ line 4
+-line 5
++line 5 CHANGED
+ line 6
+ line 7
+ line 8
+@@ -32,7 +32,7 @@
+ line 32
+ line 33
+ line 34
+-line 35
++line 35 CHANGED
+ line 36
+ line 37
+ line 38

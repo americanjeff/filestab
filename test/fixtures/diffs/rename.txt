@@ -1,0 +1,3 @@
+diff --git a/ren.txt b/renamed.txt
+rename from ren.txt
+rename to renamed.txt

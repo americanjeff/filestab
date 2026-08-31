@@ -1,0 +1,16 @@
+# filestab — bundle patch layer: the single plugin row that mounts BOTH faces.
+#
+# Dual-face package, one row (same pattern as modelspoke / dsh-web-tools).
+#
+# The row `name` MUST be the BARE package name:
+#   - the host Loader imports `name` as the node half (package `main` = the
+#     `fileBrowser` typert face service);
+#   - the web app's client scanner keys the same row to
+#     `require.resolve('filestab/package.json')` and, seeing
+#     `dsh.client.platform: "web"` + `exports["./client"]`, composes a browser
+#     graph row served at /plugins/filestab/client.js.
+# A subpath name (e.g. 'filestab/dist/dsh/client.js') is invisible to the client
+# scanner and would silently ship a host-only plugin.
+- insert:
+    - id: filestab
+      name: 'filestab'

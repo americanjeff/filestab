@@ -1,0 +1,721 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kitchen-sink.md -- cmark-gfm reference rendering</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{color-scheme:light}
+body{margin:0;background:#fff;color:#1f2328;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Helvetica,Arial,sans-serif}
+.markdown-body{max-width:980px;margin:0 auto;padding:32px 40px 64px;overflow-wrap:break-word}
+h1,h2,h3,h4,h5,h6{margin-top:24px;margin-bottom:16px;font-weight:600;line-height:1.25}
+h1{font-size:2em;padding-bottom:.3em;border-bottom:1px solid #d0d7de}
+h2{font-size:1.5em;padding-bottom:.3em;border-bottom:1px solid #d0d7de}
+h3{font-size:1.25em}
+h4{font-size:1em}
+h5{font-size:.875em}
+h6{font-size:.85em;color:#656d76}
+p{margin-top:0;margin-bottom:16px}
+a{color:#0969da;text-decoration:none}
+a:hover{text-decoration:underline}
+strong{font-weight:600}
+code{padding:.2em .4em;margin:0;font-size:85%;white-space:nowrap;background:rgba(175,184,193,.2);border-radius:6px;font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace}
+pre{padding:16px;overflow:auto;font-size:85%;line-height:1.45;background:rgba(175,184,193,.2);border-radius:6px;margin-top:0;margin-bottom:16px}
+pre code{padding:0;background:transparent;white-space:pre;border:0;font-size:100%}
+blockquote{margin:0 0 16px;padding:0 1em;color:#656d76;border-left:.25em solid #d0d7de}
+blockquote>:first-child{margin-top:0}
+blockquote>:last-child{margin-bottom:0}
+ul,ol{padding-left:2em;margin:0 0 16px}
+li{margin-top:.25em}
+.task-list-item,li:has(> input[type="checkbox"]){list-style-type:none;margin-left:-1.4em}
+.task-list-item input,li>input[type="checkbox"]{margin:0 .2em .25em 0;vertical-align:middle}
+table{border-spacing:0;border-collapse:collapse;margin-top:0;margin-bottom:16px;display:block;max-width:100%;overflow:auto}
+th,td{padding:6px 13px;border:1px solid #d0d7de}
+th{font-weight:600;background:rgba(175,184,193,.15)}
+tr{background:#fff;border-top:1px solid #d8dee4}
+td[align="center"],th[align="center"]{text-align:center}
+td[align="right"],th[align="right"]{text-align:right}
+img{max-width:100%}
+hr{height:.25em;padding:0;margin:24px 0;background-color:#d0d7de;border:0}
+details{max-width:980px;margin:0 auto;padding:0 40px 40px;color:#656d76}
+details pre{white-space:pre-wrap;font-size:12px}
+</style>
+</head>
+<body>
+<div class="markdown-body">
+<h1>Kitchen sink: every Markdown feature the Files tab renderer must handle</h1>
+<p>Compare <strong>this rendering</strong> (filestab) against <code>kitchen-sink.gfm.html</code> in the same
+folder -- cmark-gfm 0.29.0 is the exact engine GitHub runs, in GitHub-like styling.
+Each section notes what to look for.</p>
+<hr />
+<h2>1. Headings</h2>
+<h1>H1 ATX</h1>
+<h2>H2 ATX</h2>
+<h3>H3 ATX</h3>
+<h4>H4 ATX</h4>
+<h5>H5 ATX</h5>
+<h6>H6 ATX</h6>
+<h1>Setext level 1</h1>
+<h2>Setext level 2</h2>
+<p>Heading with <strong>bold</strong>, <em>italic</em>, and <code>inline code</code> inside.</p>
+<hr />
+<h2>2. Inline styles</h2>
+<p><strong>Bold</strong>, <em>italic</em>, <em><strong>bold-italic</strong></em>, and <del>struck through</del> (GFM).
+Inline code: <code>const x = 1;</code>, and a code span containing backticks: <code>`tick`</code>.
+Single-asterisk paragraph: the * here stays literal.
+Escapes: *not italic*, [not a link], and a \ backslash.
+Entities: &amp; &lt; &gt; A © and an unknown entity &amp;notanentity;
+Nested emphasis: <em>italic containing <strong>bold</strong> and <code>code</code> inside</em>.
+Code spans keep internal spacing: <code>if (a  ==  b) { }</code>, and a leading/trailing
+space is stripped: <code> padded </code>. A lone backtick ` stays literal, and an
+unclosed bold marker (**unclosed) stays literal too.</p>
+<hr />
+<h2>3. Links, images, autolinks</h2>
+<p><a href="https://spec.commonmark.org/">Inline link</a> and <a href="https://example.com">another</a>.
+<a href="https://example.com/ref-target">Reference link</a> -- core CommonMark, resolved by both.</p>
+<p><img src="https://upload.wikimedia.org/wikipedia/commons/thumb/9/99/Unofficial_Markdown_logo-SVG.svg/240px-Unofficial_Markdown_logo-SVG.svg.png" alt="markdown logo" /></p>
+<p>Angle autolink (core): <a href="https://autolink.core.example">https://autolink.core.example</a>.
+GFM bare URL: <a href="https://www.example.com/no-angle-brackets">https://www.example.com/no-angle-brackets</a> .
+GFM www form: <a href="http://www.example.com/plain">www.example.com/plain</a> .
+Unsafe, must stay non-clickable: <a href="">js link</a> and raw <!-- raw HTML omitted -->.
+With a title: <a href="https://example.com/t" title="the title">titled link</a> .
+Shortcut reference <a href="https://example.com/shortcut">shortcut</a> and collapsed reference <a href="https://example.com/collapsed">collapsed</a> use the definitions below.
+URL with spaces (angle-bracketed): <a href="https://example.com/a%20b">spaced</a>.</p>
+<p>Autolink punctuation: see <a href="https://example.com/page">https://example.com/page</a>. and <a href="http://www.example.com/path">www.example.com/path</a>, -- the trailing punctuation stays outside the link in both.</p>
+<hr />
+<h2>4. Lists</h2>
+<ul>
+<li>dash item one</li>
+<li>dash item two with <strong>bold</strong> and <code>code</code>
+<ul>
+<li>nested dash (both nest it)
+<ul>
+<li>even deeper</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<ul>
+<li>asterisk bullet</li>
+</ul>
+<ul>
+<li>plus bullet</li>
+</ul>
+<ol>
+<li>
+<p>first ordered</p>
+</li>
+<li>
+<p>second ordered</p>
+<ol>
+<li>nested ordered (both nest it)</li>
+</ol>
+</li>
+<li>
+<p>this ordered item looks like a fresh list at nine, but the blank line above
+keeps it in the same loose list, so both show it as item 3</p>
+</li>
+</ol>
+<ol start="10">
+<li>paren-delimited ordered item (core)</li>
+</ol>
+<ul>
+<li>
+<p>item containing a code block:</p>
+<pre><code class="language-js">const inner = 1;
+</code></pre>
+</li>
+<li>
+<p>item containing a blockquote:</p>
+<blockquote>
+<p>quoted inside a list item</p>
+</blockquote>
+</li>
+</ul>
+<hr />
+<h2>5. Task lists (GFM extension)</h2>
+<ul>
+<li><input type="checkbox" disabled="" /> unchecked task</li>
+<li><input type="checkbox" checked="" disabled="" /> checked task</li>
+<li><input type="checkbox" disabled="" /> task with <strong>inline styles</strong> and <code>code</code></li>
+<li><input type="checkbox" disabled="" /> parent task
+<ul>
+<li><input type="checkbox" checked="" disabled="" /> nested done</li>
+<li><input type="checkbox" disabled="" /> nested open</li>
+</ul>
+</li>
+</ul>
+<hr />
+<h2>6. Tables (GFM extension)</h2>
+<table>
+<thead>
+<tr>
+<th align="left">Left</th>
+<th align="center">Center</th>
+<th align="right">Right</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>code</code></td>
+<td align="center"><strong>bold</strong></td>
+<td align="right"><a href="https://example.com">link</a></td>
+</tr>
+<tr>
+<td align="left">plain</td>
+<td align="center">plain</td>
+<td align="right">plain</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Pipe</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>a | b | c</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>One wide column</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A very long unbroken token for overflow behavior: <a href="https://www.example.com/aaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbb/cccccccccccccccc/dddddddddddddd/eeeeeeeeeeeeeeee/ffffffffffffffff">https://www.example.com/aaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbb/cccccccccccccccc/dddddddddddddd/eeeeeeeeeeeeeeee/ffffffffffffffff</a></td>
+</tr>
+</tbody>
+</table>
+<p>Code span containing an escaped pipe (stays in one cell; the backslash shows
+inside the code), plus strikethrough in a cell:</p>
+<table>
+<thead>
+<tr>
+<th align="left">Code with pipe</th>
+<th align="center">Struck</th>
+<th align="right">Percent</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>a | b</code></td>
+<td align="center"><del>struck</del></td>
+<td align="right">100%</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>7. Code blocks</h2>
+<p>filestab syntax-highlights tagged fences (highlight.js — GitHub's engine family;
+untagged fences auto-detect and stay plain unless confident). This cmark
+reference is structure-only, so code colors differ between the two panes.</p>
+<p>Fenced, no language:</p>
+<pre><code>plain fenced line one
+plain fenced line two
+</code></pre>
+<p>Fenced with language:</p>
+<pre><code class="language-js">function double(x) {
+  return x * 2; // a comment
+}
+</code></pre>
+<p>One fence per one of the twelve registered languages (all except javascript
+shown here), then the odd fence shapes: tilde fences, a four-backtick fence
+holding triple backticks, and an unregistered language (auto-detect stays
+plain under the relevance-5 threshold).</p>
+<pre><code class="language-python">def double(x: int) -&gt; int:
+    return x * 2  # comment
+</code></pre>
+<pre><code class="language-bash">#!/usr/bin/env bash
+set -euo pipefail
+echo &quot;hello from $HOME&quot;
+</code></pre>
+<pre><code class="language-json">{ &quot;key&quot;: [1, 2, 3], &quot;flag&quot;: true }
+</code></pre>
+<pre><code class="language-css">.card { display: grid; grid-template-columns: 1fr 2fr; }
+</code></pre>
+<pre><code class="language-xml">&lt;widget theme=&quot;dark&quot;&gt;
+  &lt;label&gt;hello&lt;/label&gt;
+&lt;/widget&gt;
+</code></pre>
+<pre><code class="language-go">func main() { fmt.Println(&quot;hi&quot;) }
+</code></pre>
+<pre><code class="language-rust">fn main() { println!(&quot;hi&quot;); }
+</code></pre>
+<pre><code class="language-yaml">name: filestab
+settings:
+  theme: dark
+</code></pre>
+<pre><code class="language-sql">SELECT id, name FROM files WHERE size &gt; 1000 ORDER BY id LIMIT 10;
+</code></pre>
+<p>Tilde fence (typescript):</p>
+<pre><code class="language-ts">const n: number = 1;
+</code></pre>
+<p>Four-backtick fence holding a triple-backtick fence inside (markdown):</p>
+<pre><code class="language-markdown"># heading inside the fence
+```js
+const nested = `backtick`;
+```
+</code></pre>
+<p>Unregistered language (no highlight; auto-detect stays plain):</p>
+<pre><code class="language-notareallang">Some ordinary prose that no language claims
+with enough confidence to highlight.
+</code></pre>
+<p>Indented code (core, 4 spaces):</p>
+<pre><code>indented line one
+indented line two
+</code></pre>
+<p>A paragraph, then a blank line, then a TAB-indented line (one tab = 4 columns,
+so core CommonMark makes it indented code too):</p>
+<pre><code>(tab-indented line -- one tab = 4 columns, code block in both)
+</code></pre>
+<hr />
+<h2>8. Blockquotes</h2>
+<blockquote>
+<p>Simple quote with <strong>bold</strong>.</p>
+</blockquote>
+<blockquote>
+<p>First level</p>
+<blockquote>
+<p>Nested quote
+Back to first level</p>
+</blockquote>
+</blockquote>
+<blockquote>
+<p>Quote containing a list:</p>
+<ul>
+<li>item one</li>
+<li>item two</li>
+</ul>
+</blockquote>
+<blockquote>
+<p>Quote containing code:</p>
+<pre><code>quoted indented code
+</code></pre>
+</blockquote>
+<blockquote>
+<h3>A heading inside a quote</h3>
+<p>text under the heading</p>
+</blockquote>
+<blockquote>
+<p>Table inside a quote (GFM):</p>
+<table>
+<thead>
+<tr>
+<th align="left">a</th>
+<th align="center">b</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left">1</td>
+<td align="center">2</td>
+</tr>
+</tbody>
+</table>
+</blockquote>
+<hr />
+<h2>9. Horizontal rules</h2>
+<p>The next six rules are all horizontal rules in both renderers.</p>
+<hr />
+<hr />
+<hr />
+<hr />
+<hr />
+<hr />
+<hr />
+<h2>10. Line breaks &amp; paragraphs</h2>
+<p>Soft break (newline inside one paragraph): the CommonMark spec collapses it to
+a space, and that is how GitHub renders file blobs (it keeps the break only in
+issues/comments). filestab matches the file view so the preview does not
+surprise on check-in; this reference uses the spec-pure default:</p>
+<p>soft break line one
+soft break line two</p>
+<p>Hard break (two trailing spaces):<br />
+hard break line two</p>
+<p>Hard break (backslash at end of line): <br />
+hard break line three</p>
+<p>CRLF line endings (the next two lines end with CRLF in the source):</p>
+<p>crlf line one.
+crlf line two.</p>
+<p>Long unbroken token: <a href="https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/cccccccccccccccccccccccccccccccccccccccccc">https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/cccccccccccccccccccccccccccccccccccccccccc</a> should wrap or scroll without breaking the pane.</p>
+<hr />
+<h2>11. Raw HTML (neither renders it as HTML; compare how the residue looks)</h2>
+<!-- raw HTML omitted -->
+<!-- raw HTML omitted -->
+<p>Inline raw: <!-- raw HTML omitted -->bold via raw HTML?<!-- raw HTML omitted --> No -- escaped in both.</p>
+<hr />
+<h2>12. Edge cases</h2>
+<p>[Unclosed link] and ![unclosed image] stay literal in both.
+Two-backtick code span with backticks inside: <code>`code with ` inside`</code>.
+Emoji and Unicode pass through: 🚀 naïve café 日本語 -- fine.</p>
+<hr />
+<h2>13. Mermaid (filestab extension)</h2>
+<p>filestab renders mermaid fences in a sealed sandbox iframe (same trust level as
+the HTML preview) -- one frame per fence, all sharing a single fetched bundle;
+cmark-gfm has no mermaid extension, so the reference pane shows the raw source
+instead of the diagrams.</p>
+<pre><code class="language-mermaid">flowchart TD
+  A[Start] --&gt; B{OK?}
+  B --&gt;|yes| C[Done]
+  B --&gt;|no| A
+</code></pre>
+<p>A second fence (different diagram type, second sandbox frame):</p>
+<pre><code class="language-mermaid">sequenceDiagram
+  Alice-&gt;&gt;Bob: hello
+  Bob--&gt;&gt;Alice: hi
+</code></pre>
+<hr />
+<h2>14. Unclosed fence (intentionally last -- swallows to EOF in both)</h2>
+<p>The fence below is never closed; per CommonMark everything after is code in
+both renderers, which is the correct behavior:</p>
+<pre><code class="language-unclosed">this line and every line after is inside the unclosed fence
+</code></pre>
+
+</div>
+<details>
+<summary>Raw cmark-gfm HTML (source-level comparison with filestab's output)</summary>
+<pre>&lt;h1&gt;Kitchen sink: every Markdown feature the Files tab renderer must handle&lt;/h1&gt;
+&lt;p&gt;Compare &lt;strong&gt;this rendering&lt;/strong&gt; (filestab) against &lt;code&gt;kitchen-sink.gfm.html&lt;/code&gt; in the same
+folder -- cmark-gfm 0.29.0 is the exact engine GitHub runs, in GitHub-like styling.
+Each section notes what to look for.&lt;/p&gt;
+&lt;hr /&gt;
+&lt;h2&gt;1. Headings&lt;/h2&gt;
+&lt;h1&gt;H1 ATX&lt;/h1&gt;
+&lt;h2&gt;H2 ATX&lt;/h2&gt;
+&lt;h3&gt;H3 ATX&lt;/h3&gt;
+&lt;h4&gt;H4 ATX&lt;/h4&gt;
+&lt;h5&gt;H5 ATX&lt;/h5&gt;
+&lt;h6&gt;H6 ATX&lt;/h6&gt;
+&lt;h1&gt;Setext level 1&lt;/h1&gt;
+&lt;h2&gt;Setext level 2&lt;/h2&gt;
+&lt;p&gt;Heading with &lt;strong&gt;bold&lt;/strong&gt;, &lt;em&gt;italic&lt;/em&gt;, and &lt;code&gt;inline code&lt;/code&gt; inside.&lt;/p&gt;
+&lt;hr /&gt;
+&lt;h2&gt;2. Inline styles&lt;/h2&gt;
+&lt;p&gt;&lt;strong&gt;Bold&lt;/strong&gt;, &lt;em&gt;italic&lt;/em&gt;, &lt;em&gt;&lt;strong&gt;bold-italic&lt;/strong&gt;&lt;/em&gt;, and &lt;del&gt;struck through&lt;/del&gt; (GFM).
+Inline code: &lt;code&gt;const x = 1;&lt;/code&gt;, and a code span containing backticks: &lt;code&gt;`tick`&lt;/code&gt;.
+Single-asterisk paragraph: the * here stays literal.
+Escapes: *not italic*, [not a link], and a \ backslash.
+Entities: &amp;amp; &amp;lt; &amp;gt; A © and an unknown entity &amp;amp;notanentity;
+Nested emphasis: &lt;em&gt;italic containing &lt;strong&gt;bold&lt;/strong&gt; and &lt;code&gt;code&lt;/code&gt; inside&lt;/em&gt;.
+Code spans keep internal spacing: &lt;code&gt;if (a  ==  b) { }&lt;/code&gt;, and a leading/trailing
+space is stripped: &lt;code&gt; padded &lt;/code&gt;. A lone backtick ` stays literal, and an
+unclosed bold marker (**unclosed) stays literal too.&lt;/p&gt;
+&lt;hr /&gt;
+&lt;h2&gt;3. Links, images, autolinks&lt;/h2&gt;
+&lt;p&gt;&lt;a href="https://spec.commonmark.org/"&gt;Inline link&lt;/a&gt; and &lt;a href="https://example.com"&gt;another&lt;/a&gt;.
+&lt;a href="https://example.com/ref-target"&gt;Reference link&lt;/a&gt; -- core CommonMark, resolved by both.&lt;/p&gt;
+&lt;p&gt;&lt;img src="https://upload.wikimedia.org/wikipedia/commons/thumb/9/99/Unofficial_Markdown_logo-SVG.svg/240px-Unofficial_Markdown_logo-SVG.svg.png" alt="markdown logo" /&gt;&lt;/p&gt;
+&lt;p&gt;Angle autolink (core): &lt;a href="https://autolink.core.example"&gt;https://autolink.core.example&lt;/a&gt;.
+GFM bare URL: &lt;a href="https://www.example.com/no-angle-brackets"&gt;https://www.example.com/no-angle-brackets&lt;/a&gt; .
+GFM www form: &lt;a href="http://www.example.com/plain"&gt;www.example.com/plain&lt;/a&gt; .
+Unsafe, must stay non-clickable: &lt;a href=""&gt;js link&lt;/a&gt; and raw &lt;!-- raw HTML omitted --&gt;.
+With a title: &lt;a href="https://example.com/t" title="the title"&gt;titled link&lt;/a&gt; .
+Shortcut reference &lt;a href="https://example.com/shortcut"&gt;shortcut&lt;/a&gt; and collapsed reference &lt;a href="https://example.com/collapsed"&gt;collapsed&lt;/a&gt; use the definitions below.
+URL with spaces (angle-bracketed): &lt;a href="https://example.com/a%20b"&gt;spaced&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Autolink punctuation: see &lt;a href="https://example.com/page"&gt;https://example.com/page&lt;/a&gt;. and &lt;a href="http://www.example.com/path"&gt;www.example.com/path&lt;/a&gt;, -- the trailing punctuation stays outside the link in both.&lt;/p&gt;
+&lt;hr /&gt;
+&lt;h2&gt;4. Lists&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;dash item one&lt;/li&gt;
+&lt;li&gt;dash item two with &lt;strong&gt;bold&lt;/strong&gt; and &lt;code&gt;code&lt;/code&gt;
+&lt;ul&gt;
+&lt;li&gt;nested dash (both nest it)
+&lt;ul&gt;
+&lt;li&gt;even deeper&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;ul&gt;
+&lt;li&gt;asterisk bullet&lt;/li&gt;
+&lt;/ul&gt;
+&lt;ul&gt;
+&lt;li&gt;plus bullet&lt;/li&gt;
+&lt;/ul&gt;
+&lt;ol&gt;
+&lt;li&gt;
+&lt;p&gt;first ordered&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;second ordered&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;nested ordered (both nest it)&lt;/li&gt;
+&lt;/ol&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;this ordered item looks like a fresh list at nine, but the blank line above
+keeps it in the same loose list, so both show it as item 3&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ol&gt;
+&lt;ol start="10"&gt;
+&lt;li&gt;paren-delimited ordered item (core)&lt;/li&gt;
+&lt;/ol&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;item containing a code block:&lt;/p&gt;
+&lt;pre&gt;&lt;code class="language-js"&gt;const inner = 1;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;item containing a blockquote:&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;quoted inside a list item&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;hr /&gt;
+&lt;h2&gt;5. Task lists (GFM extension)&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;input type="checkbox" disabled="" /&gt; unchecked task&lt;/li&gt;
+&lt;li&gt;&lt;input type="checkbox" checked="" disabled="" /&gt; checked task&lt;/li&gt;
+&lt;li&gt;&lt;input type="checkbox" disabled="" /&gt; task with &lt;strong&gt;inline styles&lt;/strong&gt; and &lt;code&gt;code&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;&lt;input type="checkbox" disabled="" /&gt; parent task
+&lt;ul&gt;
+&lt;li&gt;&lt;input type="checkbox" checked="" disabled="" /&gt; nested done&lt;/li&gt;
+&lt;li&gt;&lt;input type="checkbox" disabled="" /&gt; nested open&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;hr /&gt;
+&lt;h2&gt;6. Tables (GFM extension)&lt;/h2&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th align="left"&gt;Left&lt;/th&gt;
+&lt;th align="center"&gt;Center&lt;/th&gt;
+&lt;th align="right"&gt;Right&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td align="left"&gt;&lt;code&gt;code&lt;/code&gt;&lt;/td&gt;
+&lt;td align="center"&gt;&lt;strong&gt;bold&lt;/strong&gt;&lt;/td&gt;
+&lt;td align="right"&gt;&lt;a href="https://example.com"&gt;link&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td align="left"&gt;plain&lt;/td&gt;
+&lt;td align="center"&gt;plain&lt;/td&gt;
+&lt;td align="right"&gt;plain&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;Pipe&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;a | b | c&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;One wide column&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;A very long unbroken token for overflow behavior: &lt;a href="https://www.example.com/aaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbb/cccccccccccccccc/dddddddddddddd/eeeeeeeeeeeeeeee/ffffffffffffffff"&gt;https://www.example.com/aaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbb/cccccccccccccccc/dddddddddddddd/eeeeeeeeeeeeeeee/ffffffffffffffff&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;Code span containing an escaped pipe (stays in one cell; the backslash shows
+inside the code), plus strikethrough in a cell:&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th align="left"&gt;Code with pipe&lt;/th&gt;
+&lt;th align="center"&gt;Struck&lt;/th&gt;
+&lt;th align="right"&gt;Percent&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td align="left"&gt;&lt;code&gt;a | b&lt;/code&gt;&lt;/td&gt;
+&lt;td align="center"&gt;&lt;del&gt;struck&lt;/del&gt;&lt;/td&gt;
+&lt;td align="right"&gt;100%&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;hr /&gt;
+&lt;h2&gt;7. Code blocks&lt;/h2&gt;
+&lt;p&gt;filestab syntax-highlights tagged fences (highlight.js — GitHub's engine family;
+untagged fences auto-detect and stay plain unless confident). This cmark
+reference is structure-only, so code colors differ between the two panes.&lt;/p&gt;
+&lt;p&gt;Fenced, no language:&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;plain fenced line one
+plain fenced line two
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;Fenced with language:&lt;/p&gt;
+&lt;pre&gt;&lt;code class="language-js"&gt;function double(x) {
+  return x * 2; // a comment
+}
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;One fence per one of the twelve registered languages (all except javascript
+shown here), then the odd fence shapes: tilde fences, a four-backtick fence
+holding triple backticks, and an unregistered language (auto-detect stays
+plain under the relevance-5 threshold).&lt;/p&gt;
+&lt;pre&gt;&lt;code class="language-python"&gt;def double(x: int) -&amp;gt; int:
+    return x * 2  # comment
+&lt;/code&gt;&lt;/pre&gt;
+&lt;pre&gt;&lt;code class="language-bash"&gt;#!/usr/bin/env bash
+set -euo pipefail
+echo &amp;quot;hello from $HOME&amp;quot;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;pre&gt;&lt;code class="language-json"&gt;{ &amp;quot;key&amp;quot;: [1, 2, 3], &amp;quot;flag&amp;quot;: true }
+&lt;/code&gt;&lt;/pre&gt;
+&lt;pre&gt;&lt;code class="language-css"&gt;.card { display: grid; grid-template-columns: 1fr 2fr; }
+&lt;/code&gt;&lt;/pre&gt;
+&lt;pre&gt;&lt;code class="language-xml"&gt;&amp;lt;widget theme=&amp;quot;dark&amp;quot;&amp;gt;
+  &amp;lt;label&amp;gt;hello&amp;lt;/label&amp;gt;
+&amp;lt;/widget&amp;gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;pre&gt;&lt;code class="language-go"&gt;func main() { fmt.Println(&amp;quot;hi&amp;quot;) }
+&lt;/code&gt;&lt;/pre&gt;
+&lt;pre&gt;&lt;code class="language-rust"&gt;fn main() { println!(&amp;quot;hi&amp;quot;); }
+&lt;/code&gt;&lt;/pre&gt;
+&lt;pre&gt;&lt;code class="language-yaml"&gt;name: filestab
+settings:
+  theme: dark
+&lt;/code&gt;&lt;/pre&gt;
+&lt;pre&gt;&lt;code class="language-sql"&gt;SELECT id, name FROM files WHERE size &amp;gt; 1000 ORDER BY id LIMIT 10;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;Tilde fence (typescript):&lt;/p&gt;
+&lt;pre&gt;&lt;code class="language-ts"&gt;const n: number = 1;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;Four-backtick fence holding a triple-backtick fence inside (markdown):&lt;/p&gt;
+&lt;pre&gt;&lt;code class="language-markdown"&gt;# heading inside the fence
+```js
+const nested = `backtick`;
+```
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;Unregistered language (no highlight; auto-detect stays plain):&lt;/p&gt;
+&lt;pre&gt;&lt;code class="language-notareallang"&gt;Some ordinary prose that no language claims
+with enough confidence to highlight.
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;Indented code (core, 4 spaces):&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;indented line one
+indented line two
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;A paragraph, then a blank line, then a TAB-indented line (one tab = 4 columns,
+so core CommonMark makes it indented code too):&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;(tab-indented line -- one tab = 4 columns, code block in both)
+&lt;/code&gt;&lt;/pre&gt;
+&lt;hr /&gt;
+&lt;h2&gt;8. Blockquotes&lt;/h2&gt;
+&lt;blockquote&gt;
+&lt;p&gt;Simple quote with &lt;strong&gt;bold&lt;/strong&gt;.&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;blockquote&gt;
+&lt;p&gt;First level&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;Nested quote
+Back to first level&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;/blockquote&gt;
+&lt;blockquote&gt;
+&lt;p&gt;Quote containing a list:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;item one&lt;/li&gt;
+&lt;li&gt;item two&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/blockquote&gt;
+&lt;blockquote&gt;
+&lt;p&gt;Quote containing code:&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;quoted indented code
+&lt;/code&gt;&lt;/pre&gt;
+&lt;/blockquote&gt;
+&lt;blockquote&gt;
+&lt;h3&gt;A heading inside a quote&lt;/h3&gt;
+&lt;p&gt;text under the heading&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;blockquote&gt;
+&lt;p&gt;Table inside a quote (GFM):&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th align="left"&gt;a&lt;/th&gt;
+&lt;th align="center"&gt;b&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td align="left"&gt;1&lt;/td&gt;
+&lt;td align="center"&gt;2&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;/blockquote&gt;
+&lt;hr /&gt;
+&lt;h2&gt;9. Horizontal rules&lt;/h2&gt;
+&lt;p&gt;The next six rules are all horizontal rules in both renderers.&lt;/p&gt;
+&lt;hr /&gt;
+&lt;hr /&gt;
+&lt;hr /&gt;
+&lt;hr /&gt;
+&lt;hr /&gt;
+&lt;hr /&gt;
+&lt;hr /&gt;
+&lt;h2&gt;10. Line breaks &amp;amp; paragraphs&lt;/h2&gt;
+&lt;p&gt;Soft break (newline inside one paragraph): the CommonMark spec collapses it to
+a space, and that is how GitHub renders file blobs (it keeps the break only in
+issues/comments). filestab matches the file view so the preview does not
+surprise on check-in; this reference uses the spec-pure default:&lt;/p&gt;
+&lt;p&gt;soft break line one
+soft break line two&lt;/p&gt;
+&lt;p&gt;Hard break (two trailing spaces):&lt;br /&gt;
+hard break line two&lt;/p&gt;
+&lt;p&gt;Hard break (backslash at end of line): &lt;br /&gt;
+hard break line three&lt;/p&gt;
+&lt;p&gt;CRLF line endings (the next two lines end with CRLF in the source):&lt;/p&gt;
+&lt;p&gt;crlf line one.
+crlf line two.&lt;/p&gt;
+&lt;p&gt;Long unbroken token: &lt;a href="https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/cccccccccccccccccccccccccccccccccccccccccc"&gt;https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/cccccccccccccccccccccccccccccccccccccccccc&lt;/a&gt; should wrap or scroll without breaking the pane.&lt;/p&gt;
+&lt;hr /&gt;
+&lt;h2&gt;11. Raw HTML (neither renders it as HTML; compare how the residue looks)&lt;/h2&gt;
+&lt;!-- raw HTML omitted --&gt;
+&lt;!-- raw HTML omitted --&gt;
+&lt;p&gt;Inline raw: &lt;!-- raw HTML omitted --&gt;bold via raw HTML?&lt;!-- raw HTML omitted --&gt; No -- escaped in both.&lt;/p&gt;
+&lt;hr /&gt;
+&lt;h2&gt;12. Edge cases&lt;/h2&gt;
+&lt;p&gt;[Unclosed link] and ![unclosed image] stay literal in both.
+Two-backtick code span with backticks inside: &lt;code&gt;`code with ` inside`&lt;/code&gt;.
+Emoji and Unicode pass through: 🚀 naïve café 日本語 -- fine.&lt;/p&gt;
+&lt;hr /&gt;
+&lt;h2&gt;13. Mermaid (filestab extension)&lt;/h2&gt;
+&lt;p&gt;filestab renders mermaid fences in a sealed sandbox iframe (same trust level as
+the HTML preview) -- one frame per fence, all sharing a single fetched bundle;
+cmark-gfm has no mermaid extension, so the reference pane shows the raw source
+instead of the diagrams.&lt;/p&gt;
+&lt;pre&gt;&lt;code class="language-mermaid"&gt;flowchart TD
+  A[Start] --&amp;gt; B{OK?}
+  B --&amp;gt;|yes| C[Done]
+  B --&amp;gt;|no| A
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;A second fence (different diagram type, second sandbox frame):&lt;/p&gt;
+&lt;pre&gt;&lt;code class="language-mermaid"&gt;sequenceDiagram
+  Alice-&amp;gt;&amp;gt;Bob: hello
+  Bob--&amp;gt;&amp;gt;Alice: hi
+&lt;/code&gt;&lt;/pre&gt;
+&lt;hr /&gt;
+&lt;h2&gt;14. Unclosed fence (intentionally last -- swallows to EOF in both)&lt;/h2&gt;
+&lt;p&gt;The fence below is never closed; per CommonMark everything after is code in
+both renderers, which is the correct behavior:&lt;/p&gt;
+&lt;pre&gt;&lt;code class="language-unclosed"&gt;this line and every line after is inside the unclosed fence
+&lt;/code&gt;&lt;/pre&gt;
+</pre>
+</details>
+</body>
+</html>

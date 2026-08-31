@@ -1,0 +1,15 @@
+diff --git a/big.txt b/big-renamed.txt
+rename from big.txt
+rename to big-renamed.txt
+index d3d3e88a3b..9f15073ffd 100644
+--- a/big.txt
++++ b/big-renamed.txt
+@@ -4,7 +4,7 @@
+ payload 4
+ payload 5
+ payload 6
+-payload 7
++payload 7 CHANGED
+ payload 8
+ payload 9
+ payload 10

@@ -1,0 +1,7 @@
+diff --git a/di r/sp aced.txt b/di r/sp aced.txt
+index bd4269ff9d..931c8108eb 100644
+--- a/di r/sp aced.txt
++++ b/di r/sp aced.txt
+@@ -1,1 +1,1 @@
+-spaced
++spaced CHANGED

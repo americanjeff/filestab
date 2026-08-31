@@ -1,0 +1,67 @@
+{
+  "name": "filestab",
+  "version": "0.1.0",
+  "description": "Read-only, session-workspace-scoped Files tab for the dsh web GUI (generic connection.rpc host channel + web client).",
+  "author": "American Jeff <gitjeff@americanjeff.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/americanjeff/filestab.git"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "files",
+    "file-browser",
+    "jj",
+    "git"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./client": "./dist/dsh/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "dsh.cordis.yml"
+  ],
+  "scripts": {
+    "build": "tsc && tsc -p tsconfig.client.json && tsdown && node scripts/copy-mermaid.mjs",
+    "prepack": "npm run build",
+    "test": "npm run build && node test/containment.test.mjs && node test/magic.test.mjs && node test/filesystem.test.mjs && node test/host.test.mjs && node test/jj.test.mjs && node test/git.test.mjs && node test/client.test.mjs",
+    "e2e": "node test/e2e/e2e.test.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./dsh.cordis.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@types/node": "^22.0.0",
+    "@types/react": "~18.3.1",
+    "highlight.js": "^11.12.0",
+    "markdown-it": "^15.0.1",
+    "markdown-it-task-lists": "^2.1.1",
+    "mermaid": "^11.17.2",
+    "playwright-core": "^1.62.1",
+    "tsdown": "^0.22.2",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,9 @@
+node_modules/
+*.log
+.DS_Store
+.shots/
+.jj/
+.pnpm-store/
+dist/
+.diag/
+test/e2e/out/

@@ -1,0 +1,10 @@
+diff --git a/mod.txt b/mod.txt
+index 7a28df3c97..418a74a6fc 100644
+--- a/mod.txt
++++ b/mod.txt
+@@ -1,4 +1,4 @@
+ alpha
+-beta
++BETA changed
+ gamma
+ delta
