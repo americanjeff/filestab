@@ -4,7 +4,8 @@
 // containment. File-content reads are NOT here. src/snapshot.ts owns them.
 
 import type { Dirent } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
+import { join } from "node:path";
 import { resolveInWorkspace } from "./containment.js";
 
 export const DEFAULT_LIST_CAP = 2000;
@@ -48,6 +49,26 @@ function childPath(parent: string, name: string): string {
   return parent === "" ? name : `${parent}/${name}`;
 }
 
+// A directory that is itself a jj or git repo is a VCS boundary: the
+// workspace's jj/git never tracks any file inside it, so its badges,
+// diffs, and history would all be silently dead here (verified on jj
+// 0.44: nested repos are opaque to the parent's tree). Hiding it makes
+// the listing match what the workspace VCS actually tracks. Only child
+// entries are probed — the listed directory itself is never hidden, so
+// a repo workspace still lists normally. `.git` may be a FILE (a git
+// worktree pointer) as well as a directory; both forms count.
+async function isRepoBoundary(dir: string): Promise<boolean> {
+  for (const marker of [".jj", ".git"]) {
+    try {
+      await stat(join(dir, marker));
+      return true;
+    } catch {
+      // marker absent; try the next
+    }
+  }
+  return false;
+}
+
 /**
  * @returns {{root, relPath, entries, truncated}} for a directory, or
  *          {{error, relPath}} for not-found / not-a-directory.
@@ -70,6 +91,9 @@ export async function listDirectory(
   const entries: DirEntry[] = [];
   for (const d of dirents) {
     if (!showHidden && d.name.startsWith(".")) continue;
+    // Drop child jj/git repos: the parent's VCS can not see into them, so
+    // listing them would offer files with no working VCS context.
+    if (d.isDirectory() && (await isRepoBoundary(join(abs, d.name)))) continue;
     entries.push({
       name: d.name,
       path: childPath(relPath.replace(/\/+$/, ""), d.name),

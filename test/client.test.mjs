@@ -746,4 +746,34 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
     assert.ok(md[0].p.dangerouslySetInnerHTML.__html.includes('src="data:image/png;base64,BBB"'), "md Preview: the imgMap rewrites the img src"); }
 }
 
+// 19) RPC error handling: unwrap carries the host error code, and the
+// session-not-found code maps to the localized notice instead of the raw
+// "session-not-found: no live session for <uuid>" string.
+{
+  const ok = H.unwrap({ ok: true, value: 42 });
+  assert.strictEqual(ok, 42, "unwrap: ok envelope passes the value through");
+
+  let threw = null;
+  try { H.unwrap({ ok: false, error: { code: "session-not-found", message: "no live session for session-b23c9ff7" } }); }
+  catch (e) { threw = e; }
+  assert.ok(threw, "unwrap: an error envelope throws");
+  assert.strictEqual(threw.code, "session-not-found", "unwrap: the error carries the host code");
+  assert.strictEqual(threw.message, "session-not-found: no live session for session-b23c9ff7", "unwrap: message keeps the code + message shape");
+
+  let missing = null;
+  try { H.unwrap({ ok: false, error: { message: "boom" } }); } catch (e) { missing = e; }
+  assert.strictEqual(missing.code, "rpc-failed", "unwrap: a codeless error gets the fallback code");
+  assert.strictEqual(missing.message, "boom", "unwrap: codeless error keeps the bare message");
+
+  assert.strictEqual(H.isSessionGone(threw), true, "isSessionGone: matches the session-not-found code");
+  assert.strictEqual(H.isSessionGone(new Error("session-not-found: something else")), false, "isSessionGone: plain errors are not session-gone");
+  assert.strictEqual(H.isSessionGone(null), false, "isSessionGone: null is not session-gone");
+  assert.strictEqual(H.isSessionGone("a string"), false, "isSessionGone: non-objects are not session-gone");
+
+  const t = (k) => (k === "files.sessionGone" ? "SESSION_GONE" : k);
+  assert.strictEqual(H.rpcErrorText(threw, t), "SESSION_GONE", "rpcErrorText: session-gone → localized notice");
+  assert.strictEqual(H.rpcErrorText(missing, t), "boom", "rpcErrorText: other errors pass the message through");
+  assert.strictEqual(H.rpcErrorText("plain", t), "plain", "rpcErrorText: non-Error values fall back to String");
+}
+
 console.log("client: bundle + apply + inject-face + render + diff parser/view OK");

@@ -28,13 +28,30 @@ await writeFile(join(ws, "sniff", "mystery.bin"), Buffer.from([0x00, 0x01, 0x02,
 await writeFile(join(ws, "sniff", "big.txt"), "x".repeat(1_572_864)); // 1.5 MB of text → capped read
 
 const SESSION_ID = "sess-1";
-
+// A persisted-but-NOT-LIVE session (a finished turn or a restarted runtime
+// leaves it out of the live store) whose header's cwd points at its own
+// workspace — the case the browse surface must still resolve.
+const COLD_ID = "sess-cold";
+const COLD_NOCWD_ID = "sess-cold-nocwd";
+const coldWs = join(base, "cold-ws");
+await mkdir(coldWs, { recursive: true });
+await writeFile(join(coldWs, "cold.txt"), "cold hello");
+let inspectCalls = 0;
+const fakePersistence = {
+  inspect: async (id) => {
+    inspectCalls++;
+    if (id === COLD_ID) return { meta: { id, cwd: coldWs }, events: [] };
+    if (id === COLD_NOCWD_ID) return { meta: { id }, events: [] };
+    throw new Error(`no such session: ${id}`);
+  },
+};
 let capturedHandler = null, capturedChannel = null, capturedOptions = null;
 const ctx = {
   get(name) {
     if (name === "connection") return { rpc: { handle: (channel, handler, options) => { capturedChannel = channel; capturedHandler = handler; capturedOptions = options; } } };
     if (name === "sessions") return { get: (id) => (id === SESSION_ID ? { id, header: { cwd: ws } } : undefined) };
     if (name === "sandboxPolicy") return { resolve: ({ session }) => ({ mode: "workspace-write", workspaceRoot: session?.header?.cwd }) };
+    if (name === "sessionPersistence") return fakePersistence;
     return undefined;
   },
   on() {},
@@ -69,6 +86,37 @@ const call = (endpoint, payload) => capturedHandler(endpoint, payload);
   assert.ok(!r.ok && r.error.code === "session-not-found", "unknown session: " + JSON.stringify(r)); n++; }
 { const r = await call("list", { relPath: "" });
   assert.ok(!r.ok && r.error.code === "bad-request", "missing sessionId: " + JSON.stringify(r)); n++; }
+// Cold-session resolution: a session that is NOT live in the store (a
+// finished turn or a restarted runtime leaves the live store — it is
+// fiber-scoped — while the session list and the conversation history still
+// serve it from persistence) must resolve its workspace from the persisted
+// header's cwd instead of dead-ending on the live-store miss.
+{ const r = await call("list", { sessionId: COLD_ID, relPath: "" });
+  assert.ok(r.ok, "cold session list ok: " + JSON.stringify(r));
+  assert.strictEqual(r.value.root, coldWs, "cold root = the persisted header's cwd");
+  assert.deepStrictEqual(r.value.entries.map((e) => e.name), ["cold.txt"], "cold entries"); n++; }
+{ const r = await call("list", { sessionId: COLD_ID, relPath: "../outside" });
+  assert.ok(!r.ok && r.error.code === "workspace-invalid-path", "cold root containment: " + JSON.stringify(r)); n++; }
+{ const r = await call("fileshow", { sessionId: COLD_ID, relPath: "cold.txt", rev: "worktree" });
+  assert.ok(r.ok && r.value.kind === "text" && r.value.text === "cold hello", "cold fileshow: " + JSON.stringify(r)); n++; }
+// The resolved cold root is cached (the header cwd is immutable): one
+// inspect per session id, not one per poll.
+{ const before = inspectCalls;
+  await call("list", { sessionId: COLD_ID, relPath: "" });
+  await call("list", { sessionId: COLD_ID, relPath: "" });
+  assert.strictEqual(inspectCalls, before, "cold root cached: no re-inspect"); n++; }
+// A live session never touches persistence (the live store wins).
+{ const before = inspectCalls;
+  await call("list", { sessionId: SESSION_ID, relPath: "" });
+  assert.strictEqual(inspectCalls, before, "live session: no persistence consult"); n++; }
+// A persisted header WITHOUT a cwd (pre-project legacy shape) → no-workspace,
+// mapped onto the closed envelope's internal code with the original code in
+// the message.
+{ const r = await call("list", { sessionId: COLD_NOCWD_ID, relPath: "" });
+  assert.ok(!r.ok && r.error.code === "internal" && /no-workspace/.test(r.error.message), "cold header w/o cwd → no-workspace: " + JSON.stringify(r)); n++; }
+// An id that is neither live nor persisted → the original hard failure.
+{ const r = await call("list", { sessionId: "nope", relPath: "" });
+  assert.ok(!r.ok && r.error.code === "session-not-found", "not live, not persisted → session-not-found: " + JSON.stringify(r)); n++; }
 // Envelope: the dsh rpc result is a CLOSED error-code union (rpcErrorSchema);
 // plugin codes (forbidden / not-a-directory / unknown-endpoint / vcs codes)
 // must be mapped onto it or the client rejects the whole response as an
@@ -159,6 +207,13 @@ const call = (endpoint, payload) => capturedHandler(endpoint, payload);
   assert.ok(r.value.text.includes("globalThis"), "mermaid bundle exposes a global"); n++; }
 { const r = await call("mermaid", {});
   assert.ok(r.ok, "mermaid bundle needs no session (package-local asset)"); n++; }
+// Headless-profile shape: no sessionPersistence service at all → a dead
+// session id keeps the original hard failure (no crash, no cold path).
+{ const ctx2 = { ...ctx, get(name) { if (name === "sessionPersistence") return undefined; return ctx.get(name); } };
+  apply(ctx2);
+  assert.ok(typeof capturedHandler === "function", "second apply re-registered the handler");
+  const r = await capturedHandler("list", { sessionId: "nope", relPath: "" });
+  assert.ok(!r.ok && r.error.code === "session-not-found", "no persistence service → session-not-found: " + JSON.stringify(r)); n++; }
 
 await rm(base, { recursive: true, force: true });
-console.log(`host: ${n} assertions passed (browse + fileshow worktree + mermaid bundle)`);
+console.log(`host: ${n} assertions passed (browse + cold-session resolution + fileshow worktree + mermaid bundle)`);

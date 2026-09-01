@@ -51,5 +51,40 @@ eq(mimeFor("a.svg"), "image/svg+xml", "svg has no magic signature — the table 
 eq(mimeFor("a.ico"), "image/x-icon", "ico has no magic signature");
 eq(mimeFor("X.PNG"), "image/png", "case-insensitive");
 
+// Nested jj/git repos are VCS boundaries: they must not appear in the
+// workspace listing, at any depth, whether or not hidden entries are shown.
+await mkdir(join(ws, "child-jj", "src"), { recursive: true });
+await writeFile(join(ws, "child-jj", ".jj"), "");
+await writeFile(join(ws, "child-jj", "src", "x.ts"), "x");
+await mkdir(join(ws, "child-git", "src"), { recursive: true });
+await writeFile(join(ws, "child-git", ".git"), "gitdir: /elsewhere");
+await mkdir(join(ws, "sub", "child-git-deep"), { recursive: true });
+await mkdir(join(ws, "sub", "child-git-deep", ".git"), { recursive: true });
+{
+  const r = await listDirectory(ws, "");
+  const names = r.entries.map((e) => e.name);
+  assert.ok(!names.includes("child-jj") && !names.includes("child-git"),
+    "nested repos hidden at root: " + JSON.stringify(names));
+  n++;
+  const r2 = await listDirectory(ws, "sub");
+  assert.ok(!r2.entries.map((e) => e.name).includes("child-git-deep"),
+    "nested repos hidden at depth: " + JSON.stringify(r2.entries));
+  n++;
+}
+{
+  const r = await listDirectory(ws, "", { showHidden: true });
+  const names = r.entries.map((e) => e.name);
+  assert.ok(!names.includes("child-jj") && !names.includes("child-git"),
+    "nested repos hidden even with showHidden: " + JSON.stringify(names));
+  n++;
+}
+// A directory merely NAMED .jj with no repo markers inside is not a boundary.
+await mkdir(join(ws, "plain", ".jj"), { recursive: true });
+{
+  const r = await listDirectory(ws, "plain", { showHidden: true });
+  eq(r.entries.map((e) => e.name), [".jj"], "directory named .jj without markers is listed");
+  n++;
+}
+
 await rm(base, { recursive: true, force: true });
 console.log(`filesystem: ${n} assertion-groups passed (list cap=${DEFAULT_LIST_CAP})`);

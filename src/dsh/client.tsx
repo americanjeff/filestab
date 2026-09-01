@@ -44,6 +44,7 @@ const TEXT_PREVIEW_CAP = 1024 * 1024;   // ~1 MB of text or markdown, shown in t
 const zh: Record<string, string> = {
   "view.files": "文件", "files.showHidden": "显示隐藏文件", "files.items": "个项目",
   "files.reload": "重新加载", "files.loading": "加载中…", "files.empty": "（空）", "files.fetchStuck": "目录请求未完成 —— 请点“重新加载”",
+  "files.sessionGone": "会话已不可用（服务端重启或会话已结束）—— 点“重新加载”重试",
   "files.previewEmpty": "选择文件以预览", "files.previewLoading": "正在加载预览…",
   "files.previewTruncated": "已截断（大文件）",
   "files.previewError": "无法预览此文件",
@@ -74,6 +75,7 @@ const zh: Record<string, string> = {
 const en: Record<string, string> = {
   "view.files": "Files", "files.showHidden": "Show hidden files", "files.items": "items",
   "files.reload": "Reload", "files.loading": "Loading…", "files.empty": "(empty)", "files.fetchStuck": "the list request did not complete — press Reload",
+  "files.sessionGone": "session is no longer available (server restarted or session ended) — press Reload to retry",
   "files.previewEmpty": "Select a file to preview", "files.previewLoading": "Loading preview…",
   "files.previewTruncated": "truncated (large file)",
   "files.previewError": "Couldn't preview this file",
@@ -299,13 +301,45 @@ function Icon(name: string, props: { className?: string; size?: number } | undef
   return React.createElement("span", { className: props ? props.className : undefined, "aria-hidden": "true" }, fallback);
 }
 
+// A rejected RPC carries the host's error code alongside its message so
+// callers can branch on the code rather than string-matching the text. The
+// message keeps the "code: message" shape the panes used to show verbatim.
+class RpcError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message || code);
+    this.name = "RpcError";
+    this.code = code;
+  }
+}
 function unwrap<T>(result: unknown): T {
   const r = result as { ok?: boolean; value?: T; error?: { code?: string; message?: string } } | null | undefined;
   if (!r || r.ok !== true) {
     const err = r && r.error;
-    throw new Error(err ? (err.code + ": " + (err.message || "")) : "rpc failed");
+    // .code always carries a code for branching; the "rpc-failed" fallback is
+    // a synthetic marker, not a host code, so it is never shown in the text.
+    const code = typeof err?.code === "string" && err.code ? err.code : "rpc-failed";
+    const msg = err && typeof err.message === "string" ? err.message : "";
+    const shown = code === "rpc-failed"
+      ? (msg || "rpc failed")
+      : (msg ? code + ": " + msg : code);
+    throw new RpcError(code, shown);
   }
   return r.value as T;
+}
+// The host tears a session down (server restart, session closed) while this
+// view still holds its id, so every RPC for it fails with session-not-found.
+// That is a distinct, terminal condition for this view — not a transient read
+// hiccup — so callers branch on it specifically.
+function isSessionGone(e: unknown): boolean {
+  return (e as { code?: unknown } | null | undefined)?.code === "session-not-found";
+}
+// Human text for a rejected RPC. session-not-found gets a friendly localized
+// line (never the raw code + UUID); anything else passes its message through.
+function rpcErrorText(e: unknown, t: TFunc): string {
+  if (isSessionGone(e)) return t("files.sessionGone");
+  const m = (e as { message?: string } | null | undefined)?.message;
+  return m ? m : String(e);
 }
 
 // Markdown preview: markdown-it (MIT), bundled at build time and configured
@@ -1299,7 +1333,7 @@ function PreviewPane(props: PreviewPaneProps) {
       setDiffSt({ status: "diff", for: props.relPath, file: parsed.files[0] || null, truncated: !!v.truncated, base: v.base, binary: binary || null });
     }).catch((e) => {
       if (seq !== diffSeq.current || (e && e.name === "AbortError")) return;
-      setDiffSt({ status: "error", for: props.relPath, error: String((e && e.message) || e) });
+      setDiffSt({ status: "error", for: props.relPath, error: rpcErrorText(e, t) });
     });
     return () => { c.abort(); };
   }, [props.relPath, props.status, props.base, effectiveMode]);
@@ -1344,7 +1378,7 @@ function PreviewPane(props: PreviewPaneProps) {
       } catch (e) {
         const err = e as { name?: string; message?: string };
         if (seq !== seqRef.current || (err && err.name === "AbortError")) return;
-        setSt({ status: "error", name: props.name, error: String((err && err.message) || e) });
+        setSt({ status: "error", name: props.name, error: rpcErrorText(e, t) });
       }
     })();
     return () => { c.abort(); };
@@ -1557,6 +1591,11 @@ function FilesView(props: FilesViewProps) {
   const [segments, setSegments] = React.useState(() => segmentsForPath(rootSeg, saved ? saved.path : ""));
   const [listings, setListings] = React.useState<Record<string, Listing>>({});
   const [error, setError] = React.useState<string | null>(null);
+  // True once the host reports this session as gone (server restart / session
+  // ended). Every RPC for a dead session fails with session-not-found, so the
+  // view latches: it stops the 5 s poll and shows a calm notice instead of the
+  // raw code+UUID. Reload clears it to retry (a fresh session may have come up).
+  const [sessionGone, setSessionGone] = React.useState(false);
   const [showHidden, setShowHidden] = React.useState(false);
   const [editing, setEditing] = React.useState(false);
   const [draft, setDraft] = React.useState("");
@@ -1624,8 +1663,10 @@ function FilesView(props: FilesViewProps) {
 
   // The effect fetches the current directory's listing (the worktree's, or
   // the selected commit's snapshot). The guard makes it a no-op while the
-  // entry is cached, so `listings` in the deps is loop-safe.
+  // entry is cached, so `listings` in the deps is loop-safe. A latched dead
+  // session skips the fetch entirely (every call would 404 the same way).
   React.useEffect(() => {
+    if (sessionGone) return;
     const seq = ++seqRef.current;
     if (listings[current.path]) return;
     const c = new AbortController();
@@ -1641,8 +1682,12 @@ function FilesView(props: FilesViewProps) {
         pendingSelRef.current = null;
       }
     }).catch((e) => {
-      const err = e as { message?: string };
-      if (seq === seqRef.current) setError(err && err.message ? err.message : String(e));
+      if (seq !== seqRef.current) return;
+      // A dead session is terminal for this view: latch the flag (it stops the
+      // 5 s poll and swaps the pane to the calm notice) rather than leaking the
+      // raw "session-not-found: no live session for <uuid>" string.
+      if (isSessionGone(e)) { setSessionGone(true); return; }
+      setError(rpcErrorText(e, t));
     });
     // Transport guard: a request that never settles (a dead keep-alive
     // socket, a proxy that swallows it, a stale pre-restart connection)
@@ -1656,7 +1701,7 @@ function FilesView(props: FilesViewProps) {
     }, 30000);
     return () => { c.abort(); clearTimeout(to); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current.path, showHidden, listings, revLive]);
+  }, [current.path, showHidden, listings, revLive, sessionGone]);
 
   // A reviewed-commit switch is a different TREE. The code clears the
   // listing cache (the other tree's entries poison the paths) and re-applies
@@ -1680,7 +1725,9 @@ function FilesView(props: FilesViewProps) {
   // dropdown back.
   const pollSeqRef = React.useRef(0);
   React.useEffect(() => {
-    if (!vcsOk) return;
+    // A latched dead session has no point polling (every tick would 404 the
+    // same way); the flag also re-runs this effect to clear the interval.
+    if (!vcsOk || sessionGone) return;
     const iv = setInterval(() => {
       const seq = ++pollSeqRef.current;
       const c = new AbortController();
@@ -1690,11 +1737,15 @@ function FilesView(props: FilesViewProps) {
         if (seq !== pollSeqRef.current) return; // superseded
         noteCommits(listing);
         setListings((prev) => (prev[current.path] ? Object.assign({}, prev, { [current.path]: listing }) : prev));
-      }).catch(() => {});
+      }).catch((e) => {
+        // A session that died mid-view stops the poll (the last good listing
+        // stays on screen); other transient errors keep the last listing too.
+        if (isSessionGone(e)) setSessionGone(true);
+      });
     }, 5000);
     return () => { pollSeqRef.current++; clearInterval(iv); }; // invalidate in-flight
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current.path, showHidden, vcsOk, revLive]);
+  }, [current.path, showHidden, vcsOk, revLive, sessionGone]);
 
   React.useEffect(() => {
     if (pendingSelRef.current) return; // do not clobber the not-yet-applied restored selection
@@ -1852,7 +1903,9 @@ function FilesView(props: FilesViewProps) {
     }
     if (e.key === "ArrowLeft" && segments.length > 1) { e.preventDefault(); jumpTo(segments.length - 2); }
   };
-  const reload = () => { forceRef.current = true; setListings({}); setError(null); };
+  // The reload button clears the cache and latched dead-session flag so a
+  // retry can re-resolve the session (a fresh one may have come up).
+  const reload = () => { forceRef.current = true; setSessionGone(false); setError(null); setListings({}); };
   const toggleHidden = () => { setListings({}); setShowHidden((v) => !v); };
 
   const renderRow = (entry: DirEntry, i: number) => {
@@ -1895,7 +1948,13 @@ function FilesView(props: FilesViewProps) {
 
   // A failed fetch must not leave "Loading…" as the only visible state. The
   // error renders in the list area itself (the bottom line is easy to miss).
-  const browsePane = !currentListing
+  // A latched dead session shows the calm notice regardless of any stale
+  // cached listing: the list can no longer refresh, so it is not shown.
+  const browsePane = sessionGone
+    ? <div className="dswFiles_browsePane">
+        <div className="dswFiles_error">{t("files.sessionGone")}</div>
+      </div>
+    : !currentListing
     ? <div className="dswFiles_browsePane">
         {statusLineEl}
         {error !== null
@@ -2061,4 +2120,4 @@ export { apply };
 // Test-only seam. The cordis loader ignores it (it reads apply/inject/name
 // only). This export exposes the pure preview helpers so
 // test/client.test.mjs can unit-test them.
-export const __test = { renderMarkdown, renderMarkdownWithImages, markdownImageSrcs, isLocalDocImageSrc, resolveDocImage, rewriteMarkdownImages, highlightSource, buildMermaidDoc, typeLabel, formatBytes, loadState, saveState, segmentsForPath, parseDiff, displayRows, gapAfter, statusAggregate, jjRowLabel, rollupFor, rollupLabel, rollupSlot, DiffView, unifiedCells, unifiedPairs, intraLineDiff, intraTokens, realPathOf, renderKindOf, resolvePaneMode, paneToggleModes, previewContentFor, listNavTarget };
+export const __test = { renderMarkdown, renderMarkdownWithImages, markdownImageSrcs, isLocalDocImageSrc, resolveDocImage, rewriteMarkdownImages, highlightSource, buildMermaidDoc, typeLabel, formatBytes, loadState, saveState, segmentsForPath, parseDiff, displayRows, gapAfter, statusAggregate, jjRowLabel, rollupFor, rollupLabel, rollupSlot, DiffView, unifiedCells, unifiedPairs, intraLineDiff, intraTokens, realPathOf, renderKindOf, resolvePaneMode, paneToggleModes, previewContentFor, listNavTarget, unwrap, isSessionGone, rpcErrorText };

@@ -69,7 +69,7 @@ To test a local checkout instead of the published package, install it directly: 
 The published npm package ships a prebuilt `dist/` bundle (built during `prepack`), so registry installs need no build step. For a source checkout or local path install, run `pnpm install && npm run build` first so the bundle exists. `dsh.cordis.yml` is the plugin's registration manifest; its header comment documents the constraints.
 
 ```sh
-pnpm install     # the committed .npmrc pins a repo-local pnpm store
+pnpm install     # a local (uncommitted) .npmrc may pin the pnpm store repo-locally
 npm run build    # tsc (host + client) + tsdown bundle
 npm test         # build + the full suite (pure parser tests + real jj/git I/O when the binaries are on PATH)
 npm run e2e      # browser journeys against a sandboxed dsh instance
@@ -78,6 +78,10 @@ npm run e2e      # browser journeys against a sandboxed dsh instance
 The test files are plain `node` scripts (assert + a counter), run one by one by the `test` script. They are not `node:test` suites, so `node --test` will discover nothing in them.
 
 The client bundle must keep its CJS interop shape (`window.__ModuleLoader__.load` wrapper, flat named exports); see `tsdown.config.ts`.
+
+## Changelog
+
+Coarse, per-release: [CHANGELOG.md](CHANGELOG.md) · [Releases](https://github.com/americanjeff/filestab/releases).
 
 ## License
 

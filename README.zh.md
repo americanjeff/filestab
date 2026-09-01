@@ -80,7 +80,7 @@ dsh plugin --profile web add filestab
 生成 bundle。`dsh.cordis.yml` 是插件的注册清单，其头部注释记录了相关约束。
 
 ```sh
-pnpm install     # 已提交的 .npmrc 固定了仓库本地的 pnpm store
+pnpm install     # 本地（未提交的）.npmrc 可将 pnpm store 固定在仓库内
 npm run build    # tsc（宿主端 + 客户端）+ tsdown 打包
 npm test         # 构建 + 完整测试套件（纯解析器测试 + jj/git 在 PATH 时做真实 I/O）
 npm run e2e      # 针对沙盒 dsh 实例的浏览器旅程
@@ -91,6 +91,10 @@ npm run e2e      # 针对沙盒 dsh 实例的浏览器旅程
 
 客户端 bundle 必须保持 CJS 互操作形态（`window.__ModuleLoader__.load`
 包装、扁平命名导出）；见 `tsdown.config.ts`。
+
+## 变更记录
+
+按版本粗略记录：[CHANGELOG.md](CHANGELOG.md) · [Releases](https://github.com/americanjeff/filestab/releases)。
 
 ## 许可证
 

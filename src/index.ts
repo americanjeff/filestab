@@ -77,16 +77,72 @@ function apply(ctx: Context): void {
 
 const DIFF_PATCH_CAP = 1_000_000; // chars, ~1 MB. It keeps the RPC payload and client row count sane
 
+// Cold-session workspace cache (sessionId → workspaceRoot). The persisted
+// header's cwd is IMMUTABLE — a session is ever re-created under its id via
+// resume, which reuses the stored header — so a resolved root never goes
+// stale, and skipping the re-inspect spares a full log read from disk per
+// poll. Misses are deliberately NOT cached: a not-persisted id is cheap to
+// re-check, and a log written after the first check (a crash mid-write) must
+// not stay invisible for the process's lifetime.
+const coldWorkspaceRoots = new Map<string, string>();
+
+/**
+ * The workspace root for one NOT-LIVE session, resolved from its persisted
+ * header — the same source the host's own history path reads (the session
+ * log outlives the live session store; a finished turn or a restarted
+ * runtime leaves a session listed but not attached). Returns null when the id
+ * is not persisted, or persistence itself is absent (headless profiles): the
+ * caller then reports session-not-found, the pre-existing behavior.
+ */
+async function persistedWorkspaceRoot(
+  ctx: Context,
+  sessionId: string,
+): Promise<{ root: string } | { error: RpcError } | null> {
+  const cached = coldWorkspaceRoots.get(sessionId);
+  if (cached !== undefined) return { root: cached };
+  const persistence = ctx.get("sessionPersistence") as
+    | { inspect?: (id: string) => Promise<{ meta?: { cwd?: unknown } }> }
+    | null
+    | undefined;
+  if (typeof persistence?.inspect !== "function") return null;
+  let meta: { cwd?: unknown } | undefined;
+  try {
+    meta = (await persistence.inspect(sessionId)).meta;
+  } catch {
+    return null; // no persisted log for this id → genuinely gone
+  }
+  const cwd = meta?.cwd;
+  // Route the root through the SAME policy resolver as the live path, so the
+  // cold root gets identical normalization (canonicalPath + resolvePath) and
+  // the deployment's fallback root applies to a cwd-less header exactly as it
+  // does for a live session. The resolver reads only `header.cwd` (plus
+  // `events`, for the mode-override scan — filestab ignores the mode half),
+  // so a minimal structural session is a sufficient input.
+  const pseudo = { id: sessionId, header: meta, events: [] };
+  const root = ctx.get("sandboxPolicy")?.resolve?.({ session: pseudo })?.workspaceRoot;
+  if (typeof root !== "string" || root.length === 0)
+    return { error: { code: "no-workspace", message: "session has no workspace root" } };
+  coldWorkspaceRoots.set(sessionId, root);
+  return { root };
+}
+
 async function resolveWorkspace(ctx: Context, sessionId: unknown): Promise<{ root: string } | { error: RpcError }> {
   if (typeof sessionId !== "string" || sessionId.length === 0)
     return { error: { code: "bad-request", message: "sessionId is required" } };
   const session = ctx.get("sessions")?.get?.(sessionId);
-  if (session === undefined)
-    return { error: { code: "session-not-found", message: `no live session for ${sessionId}` } };
-  const root = ctx.get("sandboxPolicy")?.resolve?.({ session })?.workspaceRoot;
-  if (typeof root !== "string" || root.length === 0)
-    return { error: { code: "no-workspace", message: "session has no workspace root" } };
-  return { root };
+  if (session !== undefined) {
+    const root = ctx.get("sandboxPolicy")?.resolve?.({ session })?.workspaceRoot;
+    if (typeof root !== "string" || root.length === 0)
+      return { error: { code: "no-workspace", message: "session has no workspace root" } };
+    return { root };
+  }
+  // NOT live. The conversation view still renders such a session (its history
+  // is served straight from persistence), so the browse surface must not
+  // dead-end on a live-store miss: resolve the root from the persisted
+  // header instead. A genuinely unknown id still reports session-not-found.
+  const cold = await persistedWorkspaceRoot(ctx, sessionId);
+  if (cold !== null) return cold;
+  return { error: { code: "session-not-found", message: `no live or persisted session for ${sessionId}` } };
 }
 
 // VCS backend dispatch (git-support.md §2). jj comes FIRST. A co-located

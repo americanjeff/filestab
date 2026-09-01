@@ -4,6 +4,8 @@ node_modules/
 .shots/
 .jj/
 .pnpm-store/
+.npmrc
 dist/
 .diag/
 test/e2e/out/
+*.tgz
