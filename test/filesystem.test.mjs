@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert";
@@ -35,6 +35,25 @@ const eq = (a, b, msg) => { assert.deepStrictEqual(a, b, msg); n++; };
   const r = await listDirectory(ws, "sub");
   eq(r.entries.map((e) => e.name), ["nested"], "sub listing");
   eq(r.entries[0].path, "sub/nested", "nested child rel path");
+}
+// Per-entry lstat (BUG-008): size + mtime ride the entry; a symlink is its
+// OWN link (lstat, not stat) — even a broken one still reports.
+{
+  const r = await listDirectory(ws, "");
+  const a = r.entries.find((e) => e.name === "a.txt");
+  eq(a.size, 11, "file size = its own bytes ('hello world')");
+  assert.ok(typeof a.mtime === "number" && a.mtime > 0, "file mtime = ms since epoch");
+  const sub = r.entries.find((e) => e.name === "sub");
+  assert.ok(typeof sub.size === "number" && typeof sub.mtime === "number", "directory entries carry their own stat too (the client ignores dir meta)");
+  n++;
+}
+{
+  await symlink(join(base, "gone"), join(ws, "dangle"));
+  const r = await listDirectory(ws, "");
+  const d = r.entries.find((e) => e.name === "dangle");
+  assert.ok(d && d.isDirectory === false, "broken symlink still listed");
+  assert.ok(typeof d.size === "number" && typeof d.mtime === "number", "broken symlink carries its own link stat (lstat never follows)");
+  n++;
 }
 {
   const r = await listDirectory(ws, "sub/nested");

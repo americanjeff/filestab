@@ -4,7 +4,7 @@ index 7a28df3c97..418a74a6fc 100644
 +++ b/mod.txt
 @@ -1,4 +1,4 @@
  alpha
--beta
-+BETA changed
+-beta one
++beta two
  gamma
  delta

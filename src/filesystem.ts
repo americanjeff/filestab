@@ -4,7 +4,7 @@
 // containment. File-content reads are NOT here. src/snapshot.ts owns them.
 
 import type { Dirent } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
+import { lstat, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveInWorkspace } from "./containment.js";
 
@@ -15,6 +15,10 @@ export interface DirEntry {
   path: string;
   isDirectory: boolean;
   hidden: boolean;
+  /** The entry's OWN size in bytes (lstat — a symlink is its link, never its target). Snapshot listings (a past VCS tree has no on-disk state) omit it. */
+  size?: number;
+  /** The entry's OWN last-modification time, ms since epoch (lstat). Omitted in snapshot listings. */
+  mtime?: number;
 }
 
 export interface ListingValue {
@@ -105,5 +109,23 @@ export async function listDirectory(
     a.isDirectory === b.isDirectory ? a.name.localeCompare(b.name) : a.isDirectory ? -1 : 1,
   );
   const truncated = entries.length > cap;
-  return { root: workspaceRoot, relPath, entries: entries.slice(0, cap), truncated };
+  const shown = entries.slice(0, cap);
+  // Per-entry lstat (BUG-008): Dirents carry no size/mtime. The pass runs
+  // AFTER the cap slice (a truncated tail costs nothing) and is NON-recursive
+  // — the listing is re-polled every 5 s, so it must stay cheap. lstat, never
+  // stat: a symlink reports its OWN link (a broken one still lists). An
+  // entry that races away between readdir and lstat simply omits the fields.
+  const meta = await Promise.all(shown.map(async (e) => {
+    try {
+      const st = await lstat(join(abs, e.name));
+      return { size: st.size, mtime: Math.round(st.mtimeMs) };
+    } catch {
+      return null;
+    }
+  }));
+  for (let i = 0; i < shown.length; i++) {
+    const m = meta[i]!;
+    if (m) { shown[i]!.size = m.size; shown[i]!.mtime = m.mtime; }
+  }
+  return { root: workspaceRoot, relPath, entries: shown, truncated };
 }

@@ -181,7 +181,7 @@ async function vcsStatus(root: string, { force = false }: { force?: boolean } = 
 // zod error blob instead of a clean note. The code maps every browse error
 // onto a standard code with its branch's required details shape. The
 // plugin-specific detail rides in `message`.
-function envelopeError(error: { code?: string; message?: string } | null | undefined, payload: BrowsePayload | null | undefined): RpcResult {
+function envelopeError(error: { code?: string; message?: string; details?: Record<string, unknown> } | null | undefined, payload: BrowsePayload | null | undefined): RpcResult {
   const code = error && error.code;
   const message = (error && error.message) || String(code ?? "error");
   switch (code) {
@@ -189,6 +189,10 @@ function envelopeError(error: { code?: string; message?: string } | null | undef
     case "not-a-directory":
     case "unknown-endpoint":
       return { ok: false, error: { code: "bad-request", message, details: { issues: [message] } } };
+    case "directory-unreadable":
+      // The list branch already built the closed shape (details.path = the
+      // failed relPath); carry the path through so the client can recover.
+      return { ok: false, error: { code: "directory-unreadable", message, details: { path: String(error?.details?.path ?? payload?.relPath ?? "") } } };
     case "session-not-found":
       return { ok: false, error: { code: "session-not-found", message, details: { sessionId: String(payload?.sessionId ?? "") } } };
     case "forbidden":
@@ -252,6 +256,11 @@ function makeBrowseHandler(ctx: Context): (endpoint: string, payload: BrowsePayl
           // All three listing backends' error shapes are this (message is
           // optional, listDirectory's variant omits it).
           const err = listing as { error: string; message?: string; relPath: string };
+          // A vanished directory (BUG-009): the closed code whose details
+          // carry the failed PATH, so the client can reset to the root
+          // instead of latching the raw "internal: not-found" string.
+          if (err.error === "not-found")
+            return { ok: false, error: { code: "directory-unreadable", message: `not-found: ${relPath}`, details: { path: relPath } } };
           return { ok: false, error: { code: err.error, message: err.message ?? err.error, details: { relPath } } };
         }
         const value: EnrichedListing = listing;

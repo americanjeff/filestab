@@ -110,13 +110,24 @@ const view = registered.comp({
   t: (k) => k,
   listDirectory: (p, s, h) => Promise.resolve({ root: "/ws", relPath: p, entries: [
     { name: "docs", path: "docs", isDirectory: true, hidden: false },
-    { name: "a.txt", path: "a.txt", isDirectory: false, hidden: false },
+    { name: "a.txt", path: "a.txt", isDirectory: false, hidden: false, size: 11, mtime: Date.now() },
   ] }),
 });
 assert.ok(view && typeof view === "object", "FilesView renders an element (no throw)");
-
 const H = mod.__test;
 assert.ok(H && typeof H.renderMarkdown === "function", "markdown renderer exposed for test");
+// BUG-008: the row meta is FILES ONLY — a stat'd file row gets size ·
+// relative age; a directory row and a stat-less file (snapshot listing) get
+// nothing. The row's title is the full detail (path — size — timestamp).
+{
+  const tag = (k) => ({ "files.ageNow": "now", "files.ageMin": "{n}m" })[k] || k;
+  const m = H.fileRowMeta({ name: "a.txt", path: "a.txt", isDirectory: false, size: 11, mtime: Date.now() }, tag);
+  assert.ok(m, "stat'd file row → meta");
+  assert.strictEqual(m.label, "11 B · now", "meta label = size · relative age");
+  assert.ok(/^a\.txt — 11 B — /.test(m.title), "row title = path — size — full timestamp: " + m.title);
+  assert.strictEqual(H.fileRowMeta({ name: "docs", path: "docs", isDirectory: true, size: 4096, mtime: Date.now() }, tag), null, "directory row → no meta (scope: files only)");
+  assert.strictEqual(H.fileRowMeta({ name: "a.txt", path: "a.txt", isDirectory: false }, tag), null, "stat-less file (snapshot listing) → no meta");
+}
 // renderMarkdown is markdown-it (html:false, linkify + fuzzyLink, breaks:false)
 // plus the task-lists plugin; these pin its exact output for the invariants.
 assert.strictEqual(H.renderMarkdown("# Hi\n\nA **bold** para."), "<h1>Hi</h1>\n<p>A <strong>bold</strong> para.</p>\n", "md: heading + bold");
@@ -315,12 +326,13 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
   assert.deepStrictEqual(D.displayRows({ rows: [mk("add", 1, "x"), mk("add", 2, "y")] }).map((d) => d.type),
     ["add", "add"], "pairing: an add run alone stays adds"); }
 
-// Intra-line diff (BUG-003): word-token LCS over a mod row's two lines;
-// changed tokens are flagged, identical lines and oversized pairs skip it.
-{ const d = D.intraLineDiff("beta", "BETA changed");
-  assert.ok(d, "intra: differing lines produce spans");
-  assert.deepStrictEqual(d.old.map((s) => [s.cls, s.text]), [["del", "beta"]], "intra: whole old line flagged del (no shared tokens)");
-  assert.deepStrictEqual(d.nw.map((s) => [s.cls, s.text]), [["add", "BETA changed"]], "intra: whole new line flagged add"); }
+// Intra-line diff (BUG-003, reworked per BUG-010 after checking the
+// established renderers — git xdiff word-diff, diff-highlight, jsdiff
+// diffWords): the alignment runs over NON-WHITESPACE tokens only, a maximal
+// run of consecutive changed tokens is ONE contiguous span whose text is
+// the original line verbatim (internal whitespace highlighted with it,
+// boundary whitespace stays context), and a whitespace-only change gets no
+// span at all. Identical lines, oversized pairs and dissimilar pairs skip.
 { const d = D.intraLineDiff("const x = 1;", "const x = 2;");
   assert.deepStrictEqual(d.old.map((s) => [s.cls, s.text]),
     [["same", "const x = "], ["del", "1"], ["same", ";"]], "intra: old side flags only the changed word");
@@ -328,8 +340,42 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
     [["same", "const x = "], ["add", "2"], ["same", ";"]], "intra: new side flags only the changed word"); }
 { assert.strictEqual(D.intraLineDiff("same line", "same line"), null, "intra: identical lines → null (row stays untouched)"); }
 { assert.strictEqual(D.intraLineDiff("a b".repeat(250), "c d".repeat(250)), null, "intra: token table above the cap → null (row tint only)"); }
-{ const addRow = { k: "add", text: "BETA changed", oldNo: null, newNo: 2, noNewline: false };
-  const delRow = { k: "del", text: "beta", oldNo: 2, newNo: null, noNewline: false };
+// Similarity gate (BUG-004): word spans only help when the two line
+// versions are genuinely similar. A rewrite (few shared tokens) falls back
+// to the plain row tint instead of churning del/add fragments.
+{ assert.strictEqual(D.intraLineDiff("beta", "BETA changed"), null, "intra: no shared tokens → null (row tint only, BUG-004)"); }
+{ assert.strictEqual(D.intraLineDiff("alpha beta gamma delta", "omega gamma theta zeta"), null, "intra: < 50% of the shorter line shared → null (BUG-004)"); }
+// An indent change on an otherwise-similar line rides the first same
+// segment (boundary whitespace is context, as in git's rendering).
+{ const d = D.intraLineDiff("if (a) doX();", "  if (a) doY();");
+  assert.deepStrictEqual(d.old.map((s) => [s.cls, s.text]),
+    [["same", "if (a) "], ["del", "doX"], ["same", "();"]], "intra: old side flags only the changed word");
+  assert.deepStrictEqual(d.nw.map((s) => [s.cls, s.text]),
+    [["same", "  if (a) "], ["add", "doY"], ["same", "();"]], "intra: the indent change stays in the context segment"); }
+// Whitespace-ONLY change (no word token differs): no span at all — git's
+// xdiff word-diff shows no marker for it either (BUG-010 research).
+{ assert.strictEqual(D.intraLineDiff("a b", "a  b"), null, "intra: a pure spacing change → no spans (row tint only)"); }
+// The changed PHRASE is one contiguous span: the whitespace between changed
+// tokens is part of the span, the boundary whitespace is not.
+{ const d = D.intraLineDiff("one two", "one two three four");
+  assert.deepStrictEqual(d.old.map((s) => [s.cls, s.text]),
+    [["same", "one two"]], "intra: old side untouched");
+  assert.deepStrictEqual(d.nw.map((s) => [s.cls, s.text]),
+    [["same", "one two "], ["add", "three four"]], "intra: the inserted phrase is one span, inner space included, no trailing space"); }
+// The owner's real pair from BUG-010 (print-md): the inserted `-rotate 90`
+// phrase must not fragment into word islands with plain spaces between.
+{ const d = D.intraLineDiff(
+    "        -gravity center -background white -extent 3300x2550 \\",
+    "        -rotate 90 -gravity center -background white -extent 2550x3300 \\");
+  assert.deepStrictEqual(d.old.map((s) => [s.cls, s.text]),
+    [["same", "        -gravity center -background white -extent "], ["del", "3300x2550"], ["same", " \\"]], "intra(010): old side flags only the dimension");
+  const adds = d.nw.filter((s) => s.cls === "add").map((s) => s.text);
+  assert.ok(adds.some((t) => /-?rotate 90/.test(t) && t.length > "rotate 90".length),
+    "intra(010): the new side's insertion is ONE span that keeps its inner space: " + JSON.stringify(adds));
+  assert.ok(adds.some((t) => t === "2550x3300"), "intra(010): the dimension swap is its own span");
+  assert.strictEqual(d.nw.filter((s) => s.cls === "add").length, 2, "intra(010): exactly two spans on the new side (no word islands)"); }
+{ const addRow = { k: "add", text: "const x = 2;", oldNo: null, newNo: 2, noNewline: false };
+  const delRow = { k: "del", text: "const x = 1;", oldNo: 2, newNo: null, noNewline: false };
   const cells = D.unifiedCells(delRow, 0, { other: addRow, side: "old" });
   const inner = cells[1].c[0];
   const spans = (function w(n, out) {
@@ -340,9 +386,12 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
     return out;
   })(inner, []);
   assert.strictEqual(spans.length, 1, "unified: a paired del row carries one spanDel");
-  assert.strictEqual(spans[0].c[0], "beta", "unified: spanDel carries the old text");
+  assert.strictEqual(spans[0].c[0], "1", "unified: spanDel carries the old text");
   const plain = D.unifiedCells(addRow, 0);
-  assert.ok(String(plain[1].c[0].c[0]).startsWith("+"), "unpaired add row stays plain text"); }
+  const plainContent = plain[1].c[0].c[0]; // the content array [markerEl, ...intra segs...]
+  assert.strictEqual(plainContent[0].p.className, "dswFiles_diffMark", "unified: the marker is its own span (the context menu excludes it from the snippet)");
+  assert.strictEqual(String(plainContent[0].c[0]), "+", "unified: the marker span carries the + glyph");
+  assert.strictEqual(plainContent[1], "const x = 2;", "unpaired add row stays plain text (no intra spans)"); }
 
 // 9) Status-line aggregate (M3): letter counts over the S1∪S2 merged set +
 //    the conflict count; "no changes" only when both are empty; non-jj → ""
@@ -473,15 +522,19 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
     assert.strictEqual(cells.length, 2, "unified: line number + cell");
     const inner = cells[1].c[0]; // the .dswFiles_diffCellIn span
     assert.ok(inner.t === "span", "cell wraps an inner cellIn span");
-    const text = String(inner.c[0]);
-    assert.ok(text.endsWith("+noeol"), "unified cell text is plain (marker + text): " + text);
-    assert.ok(!text.includes("[object Object]"), "no [object Object] in the unified cell");
+    const content = inner.c[0]; // [markerEl, "noeol"]
+    assert.strictEqual(String(content[1]), "noeol", "unified cell text is plain (marker + text)");
+    assert.ok(!String(content[1]).includes("[object Object]"), "no [object Object] in the unified cell");
     assert.ok(inner.c[1] !== null, "no-newline marker is its own child (not string-concatenated)"); }
   // Intra-line spans (BUG-003): a mod row gets strong span highlights on both
   // sides; a pure-add file renders row tints only, no spans.
   { const modEl = D.DiffView({ model: D.parseDiff(fx("modify.txt")).files[0], truncated: false, t });
     assert.strictEqual(findClass(modEl, "dswFiles_spanDel").length, 1, "diff view: the mod row flags the old line's changed span");
     assert.strictEqual(findClass(modEl, "dswFiles_spanAdd").length, 1, "diff view: the mod row flags the new line's changed span"); }
+  // Similarity gate at the render level (BUG-004): a rewritten line (no
+  // shared tokens) gets the plain row tint, no word spans.
+  { const rwEl = D.DiffView({ model: D.parseDiff(fx("rewrite.txt")).files[0], truncated: false, t });
+    assert.strictEqual(findClass(rwEl, "dswFiles_spanDel").length + findClass(rwEl, "dswFiles_spanAdd").length, 0, "rewritten row: no intra-line spans (the gate)"); }
   { const addEl = D.DiffView({ model: D.parseDiff(fx("add.txt")).files[0], truncated: false, t });
     assert.strictEqual(findClass(addEl, "dswFiles_spanDel").length + findClass(addEl, "dswFiles_spanAdd").length, 0, "pure adds: no intra-line spans"); }
 }
@@ -659,6 +712,15 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
     ["files.type.mp3", "MP3 audio", "MP3 音频"],
     ["files.type.wav", "WAV audio", "WAV 音频"],
     ["files.type.avi", "AVI video", "AVI 视频"],
+    ["files.copyPath", "Copy path", "复制路径"],
+    ["files.openLocal", "Open locally", "在本地打开"],
+    ["files.openFailed", "couldn't open the file on the desktop", "无法在桌面打开该文件"],
+    ["files.ageNow", "now", "刚刚"],
+    ["files.ageMin", "{n}m", "{n} 分钟"],
+    ["files.ageHour", "{n}h", "{n} 小时"],
+    ["files.ageDay", "{n}d", "{n} 天"],
+    ["files.pathGone", "the folder no longer exists", "文件夹已不存在"],
+    ["files.showingRoot", "showing the workspace root", "已显示工作区根目录"],
     ["files.pdfFrameTitle", "PDF preview", "PDF 预览"],
     ["files.htmlFrameTitle", "HTML preview", "HTML 预览"],
     ["files.mermaidFrameTitle", "mermaid diagram", "mermaid 图表"],
@@ -774,6 +836,185 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
   assert.strictEqual(H.rpcErrorText(threw, t), "SESSION_GONE", "rpcErrorText: session-gone → localized notice");
   assert.strictEqual(H.rpcErrorText(missing, t), "boom", "rpcErrorText: other errors pass the message through");
   assert.strictEqual(H.rpcErrorText("plain", t), "plain", "rpcErrorText: non-Error values fall back to String");
+
+  // BUG-009: details ride the error (the recovery reads details.path), and
+  // directory-unreadable localizes instead of showing "internal: not-found".
+  let dir = null;
+  try { H.unwrap({ ok: false, error: { code: "directory-unreadable", message: "not-found: sub/gone", details: { path: "sub/gone" } } }); }
+  catch (e) { dir = e; }
+  assert.ok(dir, "unwrap: directory-unreadable envelope throws");
+  assert.strictEqual(dir.code, "directory-unreadable", "unwrap: the closed code survives");
+  assert.strictEqual(dir.details.path, "sub/gone", "unwrap: details.path rides along");
+  const t2 = (k) => (k === "files.pathGone" ? "PATH_GONE" : k);
+  assert.strictEqual(H.rpcErrorText(dir, t2), "PATH_GONE (sub/gone)", "rpcErrorText: directory-unreadable → localized note + the dead path");
+  const dirNoPath = Object.assign(new Error("x"), { code: "directory-unreadable" });
+  assert.strictEqual(H.rpcErrorText(dirNoPath, t2), "PATH_GONE", "rpcErrorText: directory-unreadable without a path stays bare");
+}
+
+// BUG-006: the copy-path gate is LOOPBACK-only (an absolute path is
+// local-machine information; the deployment's --trusted-host is not loopback,
+// so the client-side check must be narrower than the GUI's own fence).
+{
+  assert.strictEqual(H.isLoopbackOrigin(), false, "loopback gate: no location (Node harness) → never offered");
+  Object.defineProperty(globalThis, "location", { value: { hostname: "127.0.0.1" }, writable: true, configurable: true });
+  assert.strictEqual(H.isLoopbackOrigin(), true, "loopback gate: 127.0.0.1");
+  globalThis.location.hostname = "localhost";
+  assert.strictEqual(H.isLoopbackOrigin(), true, "loopback gate: localhost");
+  globalThis.location.hostname = "[::1]";
+  assert.strictEqual(H.isLoopbackOrigin(), true, "loopback gate: [::1]");
+  globalThis.location.hostname = "::1";
+  assert.strictEqual(H.isLoopbackOrigin(), true, "loopback gate: bare ::1");
+  globalThis.location.hostname = "127.0.0.2";
+  assert.strictEqual(H.isLoopbackOrigin(), false, "loopback gate: 127.0.0.2 is NOT loopback");
+  globalThis.location.hostname = "10.0.0.5";
+  assert.strictEqual(H.isLoopbackOrigin(), false, "loopback gate: a private LAN address is NOT loopback");
+  delete globalThis.location;
+  assert.strictEqual(H.absolutePathOf("/ws", "src/a.txt"), "/ws/src/a.txt", "abs path: root + relPath");
+  assert.strictEqual(H.absolutePathOf("/ws/", "src/a.txt"), "/ws/src/a.txt", "abs path: the root's trailing slash is trimmed");
+}
+
+// BUG-005: "open locally" reuses dsh's own produced-files mechanism — the
+// /api host methods (host.describe / host.openPath) with dsh's unary
+// client-request envelope. The transport is plain same-origin fetch; the
+// host-side behavior (xdg-open hand-off, canOpenPath probe) is dsh's.
+{
+  // Envelope shape: the four-quadrant client-request form dsh's own client
+  // (dsh-client-connection callUnary) POSTs.
+  const env = JSON.parse(H.hostEnvelope("host.openPath", { path: "/ws/a.txt" }, "rid-1"));
+  assert.deepStrictEqual(env, { type: "client-request", rpcId: "rid-1", method: "host.openPath", payload: { path: "/ws/a.txt" } }, "envelope: type/rpcId/method/payload");
+
+  // Response parsing: ok value passes through; a closed error keeps code +
+  // message; an rpcId mismatch or malformed frame is a host-error.
+  assert.deepStrictEqual(H.parseHostResponse({ rpcId: "r1", result: { ok: true, value: { canOpenPath: true } } }, "r1"),
+    { ok: true, value: { canOpenPath: true } }, "host response: ok value");
+  assert.deepStrictEqual(H.parseHostResponse({ rpcId: "r1", result: { ok: false, error: { code: "internal", message: "path open failed: xdg-open" } } }, "r1"),
+    { ok: false, code: "internal", message: "path open failed: xdg-open" }, "host response: error code + message");
+  assert.deepStrictEqual(H.parseHostResponse({ rpcId: "x", result: { ok: true, value: 1 } }, "y"),
+    { ok: false, code: "host-error", message: "rpcId mismatch" }, "host response: rpcId mismatch");
+  assert.strictEqual(H.parseHostResponse(null, "r1").code, "host-error", "host response: malformed frame");
+
+  // The full call against a stubbed fetch: the POST leg, the echo check,
+  // and the error → RpcError mapping.
+  let sent = null;
+  globalThis.fetch = async (url, init) => {
+    sent = { url: String(url), init };
+    return { ok: true, status: 200, json: async () => ({ type: "server-response", rpcId: JSON.parse(init.body).rpcId, result: { ok: true, value: { opened: true } } }) };
+  };
+  const opened = await H.hostApi("host.openPath", { path: "/ws/a.txt" });
+  assert.deepStrictEqual(opened, { opened: true }, "hostApi: ok value");
+  assert.strictEqual(sent.url, "/api/host.openPath", "hostApi: same-origin unary path");
+  assert.deepStrictEqual(JSON.parse(sent.init.body), { type: "client-request", rpcId: JSON.parse(sent.init.body).rpcId, method: "host.openPath", payload: { path: "/ws/a.txt" } }, "hostApi: the wire envelope");
+  assert.ok(typeof JSON.parse(sent.init.body).rpcId === "string" && JSON.parse(sent.init.body).rpcId.length > 8, "hostApi: a real rpcId is minted");
+
+  globalThis.fetch = async (url, init) => ({ ok: true, status: 200, json: async () => ({ type: "server-response", rpcId: JSON.parse(init.body).rpcId, result: { ok: false, error: { code: "internal", message: "path open failed: xdg-open /nope" } } }) });
+  let threw = null;
+  try { await H.hostApi("host.openPath", { path: "/nope" }); } catch (e) { threw = e; }
+  assert.strictEqual(threw.code, "internal", "hostApi: the host error code survives");
+  assert.ok(/path open failed/.test(threw.message), "hostApi: the host message rides the error");
+
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ rpcId: "someone-else", result: { ok: true, value: {} } }) });
+  let bad = null;
+  try { await H.hostApi("host.describe", {}); } catch (e) { bad = e; }
+  assert.strictEqual(bad.code, "host-error", "hostApi: rpcId mismatch → host-error");
+
+  globalThis.fetch = async () => ({ ok: false, status: 502, json: async () => ({}) });
+  let dead = null;
+  try { await H.hostApi("host.describe", {}); } catch (e) { dead = e; }
+  assert.ok(/transport failure.*502/.test(dead.message), "hostApi: non-2xx → transport failure");
+  delete globalThis.fetch;
+
+  // The offer gate: loopback + known root + file + a positive probe.
+  assert.strictEqual(H.canOfferOpenLocal({ relPath: "a.txt", wsRoot: "/ws", openCapable: true }), false, "open gate: no location (Node) → hidden");
+  Object.defineProperty(globalThis, "location", { value: { hostname: "127.0.0.1" }, writable: true, configurable: true });
+  assert.strictEqual(H.canOfferOpenLocal({ relPath: "a.txt", wsRoot: "/ws", openCapable: true }), true, "open gate: loopback + root + probe → offered");
+  assert.strictEqual(H.canOfferOpenLocal({ relPath: null, wsRoot: "/ws", openCapable: true }), false, "open gate: no file → hidden");
+  assert.strictEqual(H.canOfferOpenLocal({ relPath: "a.txt", wsRoot: null, openCapable: true }), false, "open gate: no root → hidden");
+  assert.strictEqual(H.canOfferOpenLocal({ relPath: "a.txt", wsRoot: "/ws", openCapable: false }), false, "open gate: a negative probe → hidden");
+  globalThis.location.hostname = "dsh.example.com";
+  assert.strictEqual(H.canOfferOpenLocal({ relPath: "a.txt", wsRoot: "/ws", openCapable: true }), false, "open gate: a --trusted-host remote → hidden");
+  delete globalThis.location;
+}
+
+// BUG-008: the row-meta relative age. Compact short forms while recent
+// (with {n} interpolation), a browser-locale calendar date past 7 days, and
+// a FUTURE mtime (clock skew) also takes the date — never a negative age.
+{
+  const tag = (k) => ({ "files.ageNow": "now", "files.ageMin": "{n}m", "files.ageHour": "{n}h", "files.ageDay": "{n}d" })[k] || k;
+  const now = Date.now();
+  assert.strictEqual(H.formatAge(now - 5_000, tag), "now", "age: < 1 min → now");
+  assert.strictEqual(H.formatAge(now - 60_000, tag), "1m", "age: exactly 1 min → 1m");
+  assert.strictEqual(H.formatAge(now - 5 * 60_000, tag), "5m", "age: 5 min → 5m");
+  assert.strictEqual(H.formatAge(now - 59 * 60_000, tag), "59m", "age: 59 min stays in minutes");
+  assert.strictEqual(H.formatAge(now - 3 * 3600_000, tag), "3h", "age: 3 h → 3h");
+  assert.strictEqual(H.formatAge(now - 23 * 3600_000, tag), "23h", "age: 23 h stays in hours (< 1 day)");
+  assert.strictEqual(H.formatAge(now - 25 * 3600_000, tag), "1d", "age: 25 h rolls into days");
+  assert.strictEqual(H.formatAge(now - 2 * 86400_000, tag), "2d", "age: 2 d → 2d");
+  assert.ok(/20\d{2}/.test(H.formatAge(now - 30 * 86400_000, tag)), "age: 30 d → calendar date (carries the year): " + H.formatAge(now - 30 * 86400_000, tag));
+  assert.ok(/20\d{2}/.test(H.formatAge(now + 60_000, tag)), "age: a future mtime → calendar date, not -1m");
+}
+
+// ---- Section refs (selection → @path reference text) ----
+{
+  // mentionOf: the dsh mention grammar — plain @path, quoted @"path" when a
+  // whitespace / quote / control char is present (those are dropped).
+  assert.strictEqual(H.mentionOf("src/foo.ts"), "@src/foo.ts", "mention: plain path");
+  assert.strictEqual(H.mentionOf("my dir/foo.ts"), '@"my dir/foo.ts"', "mention: space forces the quoted form");
+  assert.strictEqual(H.mentionOf('a"b.ts'), '@"ab.ts"', "mention: an inner double quote is dropped, quoted form");
+  assert.strictEqual(H.mentionOf(""), "@", "mention: empty path degrades to a bare @");
+
+  // lineStartsOf: char offset of each line start (line 1 starts at 0).
+  assert.deepStrictEqual(H.lineStartsOf("a\nb\nc"), [0, 2, 4], "lineStarts: three lines");
+  assert.deepStrictEqual(H.lineStartsOf("no newline"), [0], "lineStarts: single line");
+  assert.deepStrictEqual(H.lineStartsOf("a\nb\n"), [0, 2, 4], "lineStarts: trailing newline = 3rd empty line");
+  assert.deepStrictEqual(H.lineStartsOf(""), [0], "lineStarts: empty text still has line 1");
+
+  // lineOfOffset: 1-based line of a char offset (binary search).
+  const starts = H.lineStartsOf("aaaa\nbb\ncccccc");
+  assert.strictEqual(H.lineOfOffset(0, starts), 1, "lineOfOffset: first char");
+  assert.strictEqual(H.lineOfOffset(3, starts), 1, "lineOfOffset: last char of line 1");
+  assert.strictEqual(H.lineOfOffset(4, starts), 1, "lineOfOffset: the newline belongs to the line it ends");
+  assert.strictEqual(H.lineOfOffset(5, starts), 2, "lineOfOffset: first char of line 2");
+  assert.strictEqual(H.lineOfOffset(13, starts), 3, "lineOfOffset: last char");
+  assert.strictEqual(H.lineOfOffset(999, starts), 3, "lineOfOffset: past the end clamps to the last line");
+
+  // buildFileRef: the final shapes (pure-ASCII, never localized).
+  assert.strictEqual(H.buildFileRef({ path: "src/foo.ts" }), "@src/foo.ts", "ref: whole file, no fragment");
+  assert.strictEqual(H.buildFileRef({ path: "src/foo.ts", start: 12 }), "@src/foo.ts:12", "ref: single line");
+  assert.strictEqual(H.buildFileRef({ path: "src/foo.ts", start: 12, end: 40 }), "@src/foo.ts:12-40", "ref: line range");
+  assert.strictEqual(H.buildFileRef({ path: "src/foo.ts", start: 12, end: 12 }), "@src/foo.ts:12", "ref: degenerate range collapses");
+  assert.strictEqual(H.buildFileRef({ path: "src/foo.ts", start: 40, end: 12 }), "@src/foo.ts:12-40", "ref: end < start is re-ordered");
+  assert.strictEqual(
+    H.buildFileRef({ path: "src/foo.ts", start: 12, end: 40, rev: "abc123" }),
+    "@src/foo.ts@abc123:12-40", "ref: snapshot mode carries the rev");
+  assert.strictEqual(
+    H.buildFileRef({ path: "my dir/foo.ts", start: 12, end: 40 }),
+    '@"my dir/foo.ts":12-40', "ref: spaced path uses the quoted mention");
+  assert.strictEqual(
+    H.buildFileRef({ path: "src/foo.ts", start: 12, end: 40, text: "const x = 1;" }),
+    '@src/foo.ts:12-40 "const x = 1;"', "ref: snippet follows the fragment");
+  assert.strictEqual(
+    H.buildFileRef({ path: "docs/notes.md", text: "Deploying to prod" }),
+    '@docs/notes.md "Deploying to prod"', "ref: snippet-only shape (no line numbers)");
+  assert.strictEqual(
+    H.buildFileRef({ path: "src/foo.ts", start: 12, text: "  const x = 1;  " }),
+    '@src/foo.ts:12 "const x = 1;"', "ref: the snippet is trimmed");
+  assert.strictEqual(
+    H.buildFileRef({ path: "src/foo.ts", start: 12, text: 'say "hi"' }),
+    '@src/foo.ts:12 "say \'hi\'"', "ref: inner double quotes become single");
+
+  // The snippet cap: ≤ REF_TEXT_MAX verbatim, beyond it head + ellipsis.
+  const short200 = "a".repeat(200);
+  assert.strictEqual(
+    H.buildFileRef({ path: "p.ts", start: 1, text: short200 }),
+    '@p.ts:1 "' + short200 + '"', "ref: a 200-char snippet fits verbatim");
+  const long = "b".repeat(250);
+  const longRef = H.buildFileRef({ path: "p.ts", start: 1, text: long });
+  const longBody = longRef.slice(9, -1); // strip `@p.ts:1 "` and the closing quote
+  assert.strictEqual(longBody, "b".repeat(200) + "…", "ref: long snippet caps at 200 chars + ellipsis, head kept");
+
+  // Blank/whitespace text produces no quote at all (the plain ref stands alone).
+  assert.strictEqual(H.buildFileRef({ path: "p.ts", start: 3, text: "   \n " }), "@p.ts:3", "ref: blank text → no quote");
+  assert.strictEqual(H.buildFileRef({ path: "p.ts", text: "" }), "@p.ts", "ref: empty text, no range → bare mention");
 }
 
 console.log("client: bundle + apply + inject-face + render + diff parser/view OK");

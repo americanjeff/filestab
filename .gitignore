@@ -9,3 +9,5 @@ dist/
 .diag/
 test/e2e/out/
 *.tgz
+verify/
+BUGS.md

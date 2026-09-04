@@ -1,6 +1,6 @@
 {
   "name": "filestab",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Read-only, session-workspace-scoped Files tab for the dsh web GUI (generic connection.rpc host channel + web client).",
   "author": "American Jeff <gitjeff@americanjeff.com>",
   "license": "MIT",

@@ -73,6 +73,14 @@ const call = (endpoint, payload) => capturedHandler(endpoint, payload);
   assert.ok(r.ok, "list root ok: " + JSON.stringify(r));
   assert.deepStrictEqual(r.value.entries.map((e) => e.name), ["sniff", "sub", "a.txt", "link", "note.md", "pic.png"], "root entries (dirs first, then name): " + JSON.stringify(r.value.entries));
   assert.strictEqual(r.value.root, ws, "root echoed"); n++; }
+// BUG-008: the lstat pass — size + mtime ride each entry on the wire (a
+// symlink entry carries its OWN link stat).
+{ const r = await call("list", { sessionId: SESSION_ID, relPath: "" });
+  const a = r.value.entries.find((e) => e.name === "a.txt");
+  assert.strictEqual(a.size, 5, "entry size rides the wire ('hello')");
+  assert.ok(Number.isFinite(a.mtime) && a.mtime > 0, "entry mtime rides the wire");
+  const link = r.value.entries.find((e) => e.name === "link");
+  assert.ok(typeof link.size === "number" && typeof link.mtime === "number", "symlink entry carries its own link stat"); n++; }
 { const r = await call("list", { sessionId: SESSION_ID, relPath: "sub" });
   assert.ok(r.ok, "list sub");
   assert.deepStrictEqual(r.value.entries.map((e) => e.name), ["b.txt"], "sub entries");
@@ -129,6 +137,13 @@ const call = (endpoint, payload) => capturedHandler(endpoint, payload);
   assert.ok(!r.ok && r.error.code === "workspace-invalid-path", "absolute → workspace-invalid-path: " + JSON.stringify(r)); n++; }
 { const r = await call("list", { sessionId: SESSION_ID, relPath: "a.txt" });
   assert.ok(!r.ok && r.error.code === "bad-request" && Array.isArray(r.error.details.issues), "list file → bad-request + issues: " + JSON.stringify(r)); n++; }
+// BUG-009: a vanished directory rides the closed code whose details carry
+// the failed PATH (details.path), so the client can reset to the root
+// instead of latching the raw "internal: not-found" string.
+{ const r = await call("list", { sessionId: SESSION_ID, relPath: "sub/gone" });
+  assert.ok(!r.ok && r.error.code === "directory-unreadable", "missing dir → directory-unreadable: " + JSON.stringify(r));
+  assert.strictEqual(r.error.details.path, "sub/gone", "missing dir: details.path carries the failed path");
+  assert.ok(/not-found: sub\/gone/.test(r.error.message), "missing dir: the message names the path"); n++; }
 { const r = await call("bogus", { sessionId: SESSION_ID });
   assert.ok(!r.ok && r.error.code === "bad-request" && Array.isArray(r.error.details.issues), "unknown endpoint → bad-request + issues: " + JSON.stringify(r)); n++; }
 
