@@ -1,7 +1,7 @@
 [![npm version](https://img.shields.io/npm/v/filestab)](https://www.npmjs.com/package/filestab)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-# filestab
+# ![filestab icon](assets/icons/filestab-icon.png) filestab
 
 English | [中文](README.zh.md)
 

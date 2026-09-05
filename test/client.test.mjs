@@ -139,13 +139,13 @@ assert.strictEqual(H.renderMarkdown("```\nplain fenced line one\nplain fenced li
 assert.ok(H.renderMarkdown("```python\ndef double(x):\n    return x * 2\n```").includes('<span class="hljs-keyword">def</span>'), "md: python fence highlighted");
 assert.ok(H.renderMarkdown("plain <script>x</script> text").includes("&lt;script&gt;"), "md: raw html escaped (html:false, safe by construction)");
 assert.ok(!H.renderMarkdown("[x](javascript:alert(1))").includes("<a "), "md: javascript: link dropped");
-assert.ok(H.renderMarkdown("[x](https://a.b)").includes('<a href="https://a.b">'), "md: safe link kept");
+assert.ok(H.renderMarkdown("[x](https://a.b)").includes('<a href="https://a.b" target="_blank" rel="noopener noreferrer">'), "md: safe link kept, opens in a new tab (BUG-012: a bare <a> click would navigate the dsh session's tab)");
 assert.strictEqual(H.renderMarkdown("line one\nline two"), "<p>line one\nline two</p>\n", "md: soft break stays a soft break (GitHub file-view behavior, renders as space)");
 assert.strictEqual(H.renderMarkdown("line one  \nline two"), "<p>line one<br>\nline two</p>\n", "md: hard break (two trailing spaces) -> <br>");
 assert.strictEqual(H.renderMarkdown("line one\\\nline two"), "<p>line one<br>\nline two</p>\n", "md: hard break (backslash) -> <br>");
 assert.strictEqual(H.renderMarkdown("| A | B |\n|---|---:|\n| 1 | 2 |"), "<table>\n<thead>\n<tr>\n<th>A</th>\n<th style=\"text-align:right\">B</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td>1</td>\n<td style=\"text-align:right\">2</td>\n</tr>\n</tbody>\n</table>\n", "md: gfm table + right alignment");
 assert.strictEqual(H.renderMarkdown("| Pipe |\n|------|\n| a \\| b \\| c |"), "<table>\n<thead>\n<tr>\n<th>Pipe</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td>a | b | c</td>\n</tr>\n</tbody>\n</table>\n", "md: one-column table, escaped pipes become literal");
-assert.ok(H.renderMarkdown("| L | C | R |\n|:--|:-:|--:|\n| `x` | **b** | [t](https://e.com) |").includes('<td style="text-align:center"><strong>b</strong></td>\n<td style="text-align:right"><a href="https://e.com">t</a></td>'), "md: inline markdown in table cells");
+assert.ok(H.renderMarkdown("| L | C | R |\n|:--|:-:|--:|\n| `x` | **b** | [t](https://e.com) |").includes('<td style="text-align:center"><strong>b</strong></td>\n<td style="text-align:right"><a href="https://e.com" target="_blank" rel="noopener noreferrer">t</a></td>'), "md: inline markdown in table cells");
 assert.strictEqual(H.renderMarkdown("Setext level 2\n-------------"), "<h2>Setext level 2</h2>\n", "md: setext heading (pipe-less line is not a table)");
 assert.ok(H.renderMarkdown("| A |\n|---|\n| 1 |\n\ntail para").includes("</table>\n<p>tail para</p>"), "md: blank line ends the table");
 assert.ok(H.renderMarkdown("| A |\n|---|\n| 1 |\nplain continuation").includes("<td>plain continuation</td>"), "md: pipe-less line continues the table as a one-cell row");
@@ -154,9 +154,9 @@ assert.strictEqual(H.renderMarkdown("a ~~strike~~ b"), "<p>a <s>strike</s> b</p>
 assert.strictEqual(H.renderMarkdown("Title\n==="), "<h1>Title</h1>\n", "md: setext h1");
 assert.ok(H.renderMarkdown("9. first\n10. second").includes('<ol start="9">'), "md: ordered list start number");
 assert.ok(H.renderMarkdown("    code()").includes("<pre><code>code()"), "md: indented code block");
-assert.ok(H.renderMarkdown("[ref][1]\n\n[1]: https://x.dev").includes('<a href="https://x.dev">ref</a>'), "md: reference link resolved");
-assert.ok(H.renderMarkdown("see https://example.com now").includes('<a href="https://example.com">https://example.com</a>'), "md: autolink (scheme)");
-assert.ok(H.renderMarkdown("GFM www form: www.example.com/plain").includes('<a href="http://www.example.com/plain">www.example.com/plain</a>'), "md: autolink (www form, fuzzyLink)");
+assert.ok(H.renderMarkdown("[ref][1]\n\n[1]: https://x.dev").includes('<a href="https://x.dev" target="_blank" rel="noopener noreferrer">ref</a>'), "md: reference link resolved, new tab");
+assert.ok(H.renderMarkdown("see https://example.com now").includes('<a href="https://example.com" target="_blank" rel="noopener noreferrer">https://example.com</a>'), "md: autolink (scheme), new tab");
+assert.ok(H.renderMarkdown("GFM www form: www.example.com/plain").includes('<a href="http://www.example.com/plain" target="_blank" rel="noopener noreferrer">www.example.com/plain</a>'), "md: autolink (www form, fuzzyLink), new tab");
 assert.ok(H.renderMarkdown("- a\n  - b\n- c").includes("<li>a\n<ul>\n<li>b</li>\n</ul>\n</li>"), "md: nested list");
 assert.strictEqual(H.renderMarkdown("\\*not italic\\*"), "<p>*not italic*</p>\n", "md: backslash escape");
 assert.strictEqual(H.renderMarkdown("- - -"), "<hr>\n", "md: spaced dashes hr");
@@ -202,6 +202,30 @@ assert.strictEqual(findDivider.length, 1, "FilesView renders one divider");
 assert.strictEqual(findDivider[0].p.role, "separator", "divider: role=separator");
 assert.strictEqual(typeof findDivider[0].p.onPointerDown, "function", "divider: draggable (onPointerDown)");
 assert.strictEqual(typeof findDivider[0].p.onDoubleClick, "function", "divider: double-click reset");
+// BUG-011: the collapsed-state cue at the pane edge — a restored collapsed
+// session renders the accent rail (the "thickened divider") and the browse
+// pane + divider unmount; the expanded view has no rail.
+const findCls = (node, cls) => (function find(node, out) {
+  if (out === undefined) out = [];
+  if (Array.isArray(node)) { for (const ch of node) find(ch, out); return out; }
+  if (!node || typeof node !== "object") return out;
+  if (typeof node.p?.className === "string" && node.p.className.split(" ").includes(cls)) out.push(node);
+  if (node.c) find(node.c, out);
+  return out;
+})(node);
+globalThis.localStorage.setItem("filestab/files/sess-collapsed", JSON.stringify({ path: "", selected: null, leftW: null, rev: null, collapsed: true }));
+const viewCollapsed = registered.comp({ t: (k) => k, sessionId: "sess-collapsed", listDirectory: (p) => Promise.resolve({ root: "/ws", relPath: p, entries: [] }) });
+const rail = findCls(viewCollapsed, "dswFiles_collapsedRail");
+assert.strictEqual(rail.length, 1, "collapsed: the pane-edge rail renders");
+assert.strictEqual(rail[0].p.role, "button", "rail: role=button");
+assert.strictEqual(rail[0].p["aria-label"], "files.expandNav", "rail: labeled as the expand action");
+assert.strictEqual(typeof rail[0].p.onClick, "function", "rail: clickable (expands)");
+assert.strictEqual(typeof rail[0].p.onKeyDown, "function", "rail: keyboard (Enter/Space)");
+assert.strictEqual(findCls(rail[0], "dswFiles_railGlyph").length, 1, "rail: carries the pane glyph (the JetBrains-stripe idiom, not a bare color)");
+assert.strictEqual(findCls(viewCollapsed, "dswFiles_divider").length, 0, "collapsed: the divider unmounts");
+assert.strictEqual(findCls(view2, "dswFiles_collapsedRail").length, 0, "expanded: no rail");
+assert.strictEqual(findCls(viewCollapsed, "dswFiles_collapseBtn").length, 0, "collapsed: the header button unmounts (one affordance per state — no double icon)");
+assert.strictEqual(findCls(view2, "dswFiles_collapseBtn").length, 1, "expanded: the header button renders");
 delete globalThis.localStorage;
 
 // 8) Unified-diff parser (M2), table tests against the golden fixtures, which

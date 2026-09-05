@@ -112,19 +112,28 @@ const en: Record<string, string> = {
 
 // CSS adapted from dsh-client-ui-directory-picker-browse, re-prefixed to dswFiles_.
 const css = [
-  ".dswFiles_root{display:flex;flex-direction:column;height:100%;min-height:0}",
+  ".dswFiles_root{position:relative;display:flex;flex-direction:column;height:100%;min-height:0}",
   ".dswFiles_header{border-bottom:1px solid var(--dsw-alias-border-l3);flex-direction:row;flex:none;align-items:center;gap:8px;padding:12px 14px 8px 16px;display:flex}",
-  // Left-pane collapse toggle. The button lives in the header (not the
-  // browse pane) because it must stay reachable WHILE the pane is hidden.
+  // Collapse toggle — EXPANDED STATE ONLY. It sits in the header next to the
+  // breadcrumb, where the list's controls live. While the list is hidden the
+  // button unmounts and the pane-edge strip (BUG-011) is the re-opener: one
+  // affordance per state, so the same icon never appears twice (the BUG-007
+  // accented/flipped header icon in the collapsed state is superseded).
   ".dswFiles_collapseBtn{color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;border-radius:6px;flex:none;align-items:center;padding:2px 4px;display:inline-flex}",
   ".dswFiles_collapseBtn:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}",
-  // Collapsed-state cue (BUG-007): the pane unmounts, so the toggle is the
-  // ONLY remaining indication. Identical icon in both states read as a broken
-  // layout on session restore. The button stays accented while collapsed and
-  // the glyph flips 180° — the aria-expanded state, made visible.
-  '.dswFiles_collapseBtn[aria-expanded="false"]{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-active,var(--dsw-alias-interactive-bg-hover))}',
-  ".dswFiles_collapseGlyph{transition:transform .15s ease}",
-  '.dswFiles_collapseBtn[aria-expanded="false"] .dswFiles_collapseGlyph{transform:rotate(180deg)}',
+  // Collapsed-state cue at the pane edge (BUG-011): the IDE idiom for a
+  // collapsed pane is a thin strip that REPLACES the pane's edge (the
+  // JetBrains "tool window stripe"), not a state color — color reads as
+  // focus/active, not as a pane state. A 15px full-height raised surface at
+  // the left edge (the boundary with the dsh conversation pane: the
+  // "thickened divider") carries the pane's glyph; surface + symbol do the
+  // talking. Click (or Enter/Space) expands; hover raises it further. The
+  // header toggle is expanded-state-only, so this is the SOLE affordance
+  // while collapsed. Reuses files.expandNav; no new i18n keys.
+  ".dswFiles_collapsedRail{cursor:pointer;border:none;border-right:1px solid var(--dsw-alias-border-l3);color:var(--dsw-alias-label-secondary);padding:0;position:absolute;top:0;bottom:0;left:0;width:15px;z-index:2;display:flex;align-items:flex-start;justify-content:center;background:var(--dsw-alias-bg-elevated,rgba(127,127,127,.10))}",
+  ".dswFiles_collapsedRail:hover,.dswFiles_collapsedRail:focus-visible{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}",
+  ".dswFiles_collapsedRail:focus-visible{outline:1px solid var(--dsw-alias-state-focus-ring,currentColor);outline-offset:-1px}",
+  ".dswFiles_railGlyph{margin-top:10px}",
   ".dswFiles_crumbBar{box-sizing:border-box;border:1px solid #0000;border-radius:8px;align-items:center;gap:4px;min-height:24px;margin-left:-6px;padding:0 8px;display:flex;flex-wrap:wrap}",
   ".dswFiles_crumbBar:has(.dswFiles_crumbEditZone:enabled:hover),.dswFiles_crumbBar:has(.dswFiles_crumbEditZone:focus-visible),.dswFiles_crumbBar:has(.dswFiles_pathInput){border-color:var(--dsw-alias-border-l2)}",
   ".dswFiles_crumbTrail{scrollbar-width:none;flex:0 auto;align-items:center;gap:4px;min-width:0;display:flex;overflow-x:auto}",
@@ -424,6 +433,21 @@ function highlightCode(code: string, lang: string): string {
 const mdEngine = new MarkdownIt({ html: false, linkify: true, breaks: false, highlight: highlightCode });
 mdEngine.linkify.set({ fuzzyLink: true });
 mdEngine.use(taskLists);
+// Preview links must not navigate the app: the preview renders into the top
+// document (dangerouslySetInnerHTML), so a bare <a href> click navigates the
+// dsh session's tab to the URL, replacing the session (BUG-012). Both
+// [text](url) and linkify autolinks flow through the link_open rule, so one
+// override covers both: every preview link opens in a new tab, and
+// rel="noopener" keeps that tab from reaching window.opener.
+const mdLinkOpenDefault = mdEngine.renderer.rules.link_open ?? ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+mdEngine.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+  const token = tokens[idx];
+  if (token !== void 0) {
+    token.attrSet("target", "_blank");
+    token.attrSet("rel", "noopener noreferrer");
+  }
+  return mdLinkOpenDefault(tokens, idx, options, env, self);
+};
 function renderMarkdown(md: unknown): string {
   return mdEngine.render(String(md));
 }
@@ -2866,17 +2890,33 @@ function FilesView(props: FilesViewProps) {
   </button>;
 
   return <div className="dswFiles_root">
+    {/* BUG-011: while the file list is unmounted, the pane's left edge is
+        the only remaining boundary with the dsh conversation pane — a thin
+        raised strip with the pane's glyph there (the JetBrains "tool
+        window stripe" idiom) is the "thickened divider" cue (see CSS). */}
+    {collapsed && <div
+      className="dswFiles_collapsedRail"
+      role="button"
+      tabIndex={0}
+      aria-label={t("files.expandNav")}
+      title={t("files.expandNav")}
+      onClick={() => setCollapsed(false)}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setCollapsed(false); } }}
+    >
+      {Icon("IconPanelLeftOutline16", { size: 14, className: "dswFiles_railGlyph" }, "▤")}
+    </div>}
     <div className="dswFiles_header">
-      <button
+      {/* Expanded state only: while the list is hidden, the pane-edge strip
+          is the re-opener — one toggle per state, never both (BUG-011). */}
+      {!collapsed && <button
         type="button"
         className="dswFiles_collapseBtn"
-        onClick={() => setCollapsed((v) => !v)}
-        aria-label={collapsed ? t("files.expandNav") : t("files.collapseNav")}
-        title={collapsed ? t("files.expandNav") : t("files.collapseNav")}
-        aria-expanded={!collapsed}
+        onClick={() => setCollapsed(true)}
+        aria-label={t("files.collapseNav")}
+        title={t("files.collapseNav")}
       >
         {Icon("IconPanelLeftOutline16", { size: 16, className: "dswFiles_collapseGlyph" }, "▤")}
-      </button>
+      </button>}
       <div className="dswFiles_crumbBar">
         {editing ? crumbInput : [crumbTrail, crumbEditZone]}
       </div>

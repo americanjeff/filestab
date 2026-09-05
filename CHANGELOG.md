@@ -1,6 +1,9 @@
 # Changelog
 
-Coarse, per-release — deliberately not a commit log. Full history lives in the release notes on GitHub and in the (private) jj dev line. Newest first.
+## [0.1.3] - 2026-09-05
+
+- Files view: the collapsed file list now shows a pane-edge rail instead of a small header icon.
+- Markdown preview links open in a new tab instead of navigating the session away.
 
 ## [0.1.2] - 2026-09-03
 

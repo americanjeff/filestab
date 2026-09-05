@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" color="#836042">
+  <title>filestab — monochrome</title>
+  <defs>
+    <!-- knife silhouette, local coords: tip at origin, hilt up -->
+    <g id="kn">
+      <circle cx="0" cy="-47.6" r="2.7"/>
+      <rect x="-3.2" y="-46" width="6.4" height="11" rx="2.8"/>
+      <rect x="-8" y="-35" width="16" height="4.5" rx="2.25"/>
+      <path d="M0 0 C2.2 -4.5 3.4 -9 3.4 -14 V-30 H-3.4 V-14 C-3.4 -9 -2.2 -4.5 0 0 Z"/>
+    </g>
+    <!-- cut the folder open where the knife enters, leaving a gap around it -->
+    <mask id="cut" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
+      <rect width="64" height="64" fill="#fff"/>
+      <g transform="translate(25 40) rotate(45)">
+        <use href="#kn" fill="#000" stroke="#000" stroke-width="5"/>
+      </g>
+    </mask>
+  </defs>
+  <g fill="currentColor" mask="url(#cut)">
+    <path d="M11 14 H25 L31 20 H53 Q56 20 56 23 V49 Q56 52 53 52 H11 Q8 52 8 49 V17 Q8 14 11 14 Z"/>
+  </g>
+  <g transform="translate(25 40) rotate(45)" fill="currentColor">
+    <use href="#kn"/>
+  </g>
+</svg>
