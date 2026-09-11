@@ -945,6 +945,66 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
   let dead = null;
   try { await H.hostApi("host.describe", {}); } catch (e) { dead = e; }
   assert.ok(/transport failure.*502/.test(dead.message), "hostApi: non-2xx → transport failure");
+
+  // BUG-013: the method names moved in 0.1.2 (dsh-host-apiproxy's `host`
+  // domain was removed). The probe and the open try the 0.1.2 session-
+  // controller remotes first, and only an HTTP 404 (unknown method) retries
+  // once on the 0.1.1 names. The fetch stub routes by URL.
+  const okBody = (value, init) => ({ type: "server-response", rpcId: JSON.parse(init.body).rpcId, result: { ok: true, value } });
+  const hostStub = (routes) => {
+    const calls = [];
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      const m = u.replace("/api/", "");
+      calls.push(m);
+      const r = routes[m] ?? routes.default;
+      if (r.status) return { ok: r.status < 400, status: r.status, json: async () => ({}) };
+      return { ok: true, status: 200, json: async () => okBody(r.value, init) };
+    };
+    return calls;
+  };
+
+  // 0.1.2 host: the session remotes answer; the 0.1.1 names are never tried.
+  // The gateway validates typert remotes with a wrapped payload:
+  // { args: { request: {…} } } (no-parameter: { args: {} }).
+  let calls = hostStub({
+    "session/canOpenWorkspacePath": { value: true },
+    "session/openWorkspacePath": { value: { opened: true } },
+    "host.describe": { status: 404 },
+    "host.openPath": { status: 404 },
+  });
+  assert.deepStrictEqual(await H.hostDescribe(), { canOpenPath: true }, "hostDescribe: 0.1.2 probe value");
+  assert.deepStrictEqual(calls, ["session/canOpenWorkspacePath"], "hostDescribe: only the 0.1.2 method");
+  assert.deepStrictEqual(await H.hostOpenPath("/ws/a.txt"), { opened: true }, "hostOpenPath: 0.1.2 open value");
+  assert.deepStrictEqual(calls, ["session/canOpenWorkspacePath", "session/openWorkspacePath"], "hostOpenPath: only the 0.1.2 method");
+  calls = hostStub({ "session/canOpenWorkspacePath": { value: false } });
+  assert.deepStrictEqual(await H.hostDescribe(), { canOpenPath: false }, "hostDescribe: 0.1.2 false stays false");
+
+  // 0.1.1 host: the session remotes 404 (never existed), the fallback hits
+  // the host domain with the unwrapped payload.
+  calls = hostStub({
+    "session/canOpenWorkspacePath": { status: 404 },
+    "session/openWorkspacePath": { status: 404 },
+    "host.describe": { value: { canOpenPath: true, version: "0.0.1" } },
+    "host.openPath": { value: { opened: true } },
+  });
+  assert.deepStrictEqual(await H.hostDescribe(), { canOpenPath: true, version: "0.0.1" }, "hostDescribe: 404 → 0.1.1 fallback value");
+  assert.deepStrictEqual(calls, ["session/canOpenWorkspacePath", "host.describe"], "hostDescribe: one 404, then the 0.1.1 method");
+  assert.deepStrictEqual(await H.hostOpenPath("/ws/a.txt"), { opened: true }, "hostOpenPath: 404 → 0.1.1 fallback value");
+  assert.deepStrictEqual(calls.slice(-1), ["host.openPath"], "hostOpenPath: one 404, then the 0.1.1 method");
+
+  // Non-404 failures do NOT fall back: a transport failure and a host error
+  // propagate to the caller (which degrades to hiding the action).
+  calls = hostStub({ "session/canOpenWorkspacePath": { status: 502 }, "host.describe": { value: { canOpenPath: true } } });
+  let t502 = null;
+  try { await H.hostDescribe(); } catch (e) { t502 = e; }
+  assert.ok(/transport failure.*502/.test(t502.message), "hostDescribe: 502 propagates (no fallback)");
+  assert.deepStrictEqual(calls, ["session/canOpenWorkspacePath"], "hostDescribe: 502 never reaches the 0.1.1 method");
+  const errBody = (init) => ({ type: "server-response", rpcId: JSON.parse(init.body).rpcId, result: { ok: false, error: { code: "internal", message: "xdg-open missing" } } });
+  globalThis.fetch = async (url, init) => ({ ok: true, status: 200, json: async () => errBody(init) });
+  let tErr = null;
+  try { await H.hostOpenPath("/ws/a.txt"); } catch (e) { tErr = e; }
+  assert.strictEqual(tErr.code, "internal", "hostOpenPath: a host error propagates (no fallback)");
   delete globalThis.fetch;
 
   // The offer gate: loopback + known root + file + a positive probe.

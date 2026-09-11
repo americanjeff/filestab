@@ -1,0 +1,883 @@
+<!doctype html>
+<!--
+  filestab v2 mockup — interactive layout exploration.
+  Single file, no dependencies. Open directly in a browser (file:// works).
+
+  Layout levers (the things to iterate on):
+    MOCK CONTROLS bar (top): [Main swap | Split above chat]
+        - Main swap:  clicking a changed file takes over the whole center column (selectPanel).
+        - Split:      the "future dsh feature" — viewer above chat with a draggable divider.
+    Right bar capsule: [Changes | Files] segments, snapshot dropdown.
+    Diff viewer header: [This file | Whole set], [Side | Unified], back-to-chat (or Esc).
+  Data is all in the DATA block below — edits there re-render everything.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>filestab v2 — mockup</title>
+<style>
+  :root {
+    --bg-frame: #141519;
+    --bg-panel: #1b1c21;
+    --bg-raised: #222329;
+    --bg-hover: #282930;
+    --bg-active: #2f3138;
+    --line: #2c2d34;
+    --line-strong: #3a3c45;
+    --ink: #d7d9e0;
+    --ink-dim: #9a9daa;
+    --ink-faint: #6b6e7b;
+    --accent: #7aa2f7;
+    --st-m: #e0a458;
+    --st-a: #71c376;
+    --st-d: #e06c75;
+    --st-r: #6cb6e0;
+    --diff-del-bg: rgba(224,108,117,.10);
+    --diff-del-ln: rgba(224,108,117,.38);
+    --diff-add-bg: rgba(113,195,118,.10);
+    --diff-add-ln: rgba(113,195,118,.38);
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, "Segoe UI", Inter, Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg-frame); color: var(--ink);
+    font: 13px/1.45 var(--sans);
+    overflow: hidden;
+  }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+  .dim { color: var(--ink-dim); }
+  .faint { color: var(--ink-faint); }
+
+  /* ================= frame: sidebar | center | rightbar ================= */
+  #frame { display: grid; grid-template-columns: 52px 1fr auto; grid-template-rows: minmax(0, 1fr); height: 100vh; }
+  #frame.split { /* nothing structural changes; center handles the split */ }
+
+  /* ---- sidebar rail (decorative) ---- */
+  #rail { background: var(--bg-panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; padding-top: 10px; gap: 4px; }
+  .rail-btn { width: 34px; height: 34px; border-radius: 8px; display: grid; place-items: center; color: var(--ink-faint); font-size: 16px; }
+  .rail-btn:hover { background: var(--bg-hover); color: var(--ink-dim); }
+  .rail-btn.on { color: var(--ink); background: var(--bg-raised); }
+  .rail-spacer { flex: 1; }
+
+  /* ================= center column ================= */
+  #center { display: flex; flex-direction: column; min-width: 0; background: var(--bg-frame); position: relative; }
+  #viewerPane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  #viewerPane.collapsed { display: none; }
+  #splitBar { display: none; height: 5px; flex: none; cursor: row-resize; background: transparent; position: relative; }
+  #splitBar::after { content: ""; position: absolute; left: 0; right: 0; top: 2px; height: 1px; background: var(--line-strong); }
+  #splitBar:hover::after, #splitBar.drag::after { background: var(--accent); }
+  body.layout-split #splitBar { display: block; }
+  body.layout-split #viewerPane.collapsed { display: none; }
+
+  #chatPane { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+  #chatPane.hidden { display: none; }
+  .chat-scroll { flex: 1; overflow-y: auto; padding: 28px 0; }
+  .chat-inner { max-width: 720px; margin: 0 auto; padding: 0 24px; display: flex; flex-direction: column; gap: 18px; }
+  .bubble { padding: 10px 14px; border-radius: 10px; max-width: 92%; }
+  .bubble.user { background: var(--bg-raised); align-self: flex-end; border: 1px solid var(--line); }
+  .bubble.assistant { background: transparent; align-self: flex-start; border-left: 2px solid var(--line-strong); padding-left: 14px; }
+  .bubble .who { font-size: 11px; color: var(--ink-faint); margin-bottom: 4px; }
+  .chat-input { margin: 12px auto 18px; max-width: 720px; width: calc(100% - 48px); }
+  .chat-input .box { border: 1px solid var(--line-strong); border-radius: 10px; background: var(--bg-panel); padding: 10px 14px; color: var(--ink-faint); }
+
+  /* ================= diff viewer (main-area occupant) ================= */
+  #viewer { flex: 1; display: none; flex-direction: column; min-height: 0; background: var(--bg-panel); }
+  #viewer.show { display: flex; }
+  .viewer-head { flex: none; display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--bg-panel); }
+  .viewer-head .back { display: flex; align-items: center; gap: 6px; color: var(--ink-dim); padding: 4px 8px; border-radius: 6px; }
+  .viewer-head .back:hover { background: var(--bg-hover); color: var(--ink); }
+  .vpath { font-family: var(--mono); font-size: 12.5px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .vpath .old { color: var(--ink-faint); }
+  .st { font: 700 11px/1 var(--mono); padding: 3px 6px; border-radius: 4px; }
+  .st.M { color: var(--st-m); background: rgba(224,164,88,.14); }
+  .st.A { color: var(--st-a); background: rgba(113,195,118,.14); }
+  .st.D { color: var(--st-d); background: rgba(224,108,117,.14); }
+  .st.R { color: var(--st-r); background: rgba(108,182,224,.14); }
+  .vdelta { font: 11.5px var(--mono); color: var(--ink-dim); white-space: nowrap; }
+  .vdelta .a { color: var(--st-a); }
+  .vdelta .d { color: var(--st-d); }
+  .vhead-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .seg { display: flex; background: var(--bg-raised); border: 1px solid var(--line); border-radius: 7px; padding: 2px; }
+  .seg button { padding: 3px 10px; border-radius: 5px; color: var(--ink-dim); font-size: 12px; }
+  .seg button.on { background: var(--bg-active); color: var(--ink); }
+  .vsnap { font-size: 12px; color: var(--ink-faint); padding: 3px 8px; border-radius: 6px; }
+  .vsnap:hover { background: var(--bg-hover); color: var(--ink-dim); }
+
+  .diff-scroll { flex: 1; overflow: auto; position: relative; }
+  .diff-gutter-toc { position: sticky; top: 0; float: right; }
+  /* whole-set mode: file sections */
+  .fsection { border-bottom: 1px solid var(--line); }
+  .fhead {
+    position: sticky; top: 0; z-index: 5;
+    display: flex; align-items: center; gap: 10px;
+    background: var(--bg-raised); border-bottom: 1px solid var(--line-strong);
+    padding: 6px 12px 6px 10px;
+  }
+  .fhead .vpath { color: var(--ink); }
+  /* single-file mode: no sticky header (viewer head already names it) */
+  .toc-strip { position: absolute; top: 0; bottom: 0; right: 0; width: 14px; background: rgba(20,21,25,.55); border-left: 1px solid var(--line); }
+  .toc-dot { position: absolute; width: 8px; height: 8px; border-radius: 50%; transform: translateX(-50%); left: 50%; cursor: pointer; opacity: .85; }
+  .toc-dot:hover { opacity: 1; transform: translateX(-50%) scale(1.3); }
+  .toc-dot.cur { box-shadow: 0 0 0 2px var(--bg-panel), 0 0 0 3.5px var(--ink-dim); }
+
+  /* diff rows — unified */
+  .drow { display: flex; font: 12px/1.6 var(--mono); white-space: pre; }
+  .drow .ln { flex: none; width: 40px; text-align: right; padding-right: 10px; color: var(--ink-faint); user-select: none; }
+  .drow .code { padding-right: 16px; }
+  .drow.del { background: var(--diff-del-bg); }
+  .drow.del .ln { color: var(--diff-del-ln); }
+  .drow.add { background: var(--diff-add-bg); }
+  .drow.add .ln { color: var(--diff-add-ln); }
+  /* diff rows — side by side */
+  table.sb { border-collapse: collapse; font: 12px/1.6 var(--mono); width: 100%; }
+  table.sb td { white-space: pre; padding: 0 10px 0 0; vertical-align: top; }
+  table.sb td.ln { width: 40px; text-align: right; color: var(--ink-faint); user-select: none; border-right: 1px solid var(--line); }
+  table.sb tr.del td:first-child, table.sb tr.del .oldside { background: var(--diff-del-bg); }
+  table.sb tr.add td:first-child, table.sb tr.add .newside { background: var(--diff-add-bg); }
+  table.sb .side { width: 50%; }
+
+  /* ================= right bar ================= */
+  #rightbar { background: var(--bg-panel); border-left: 1px solid var(--line); display: flex; flex-direction: column; min-width: 0; position: relative; width: 380px; }
+  #rbResize { position: absolute; left: -4px; top: 0; bottom: 0; width: 4px; cursor: col-resize; background: transparent; z-index: 10; }
+  #rbResize:hover, #rbResize.drag { background: var(--accent); opacity: .5; }
+  .rb-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 10px 12px 8px; }
+  .rb-title { font-size: 13px; font-weight: 600; }
+  .rb-head .icon-btn { margin-left: auto; color: var(--ink-faint); padding: 4px; border-radius: 6px; }
+  .rb-head .icon-btn:hover { background: var(--bg-hover); color: var(--ink-dim); }
+  .rb-segs { flex: none; padding: 0 12px 8px; }
+  .rb-segs .seg { display: flex; width: 100%; }
+  .rb-segs .seg button { flex: 1; text-align: center; padding: 4px 0; }
+  .rb-segs .seg .n { color: var(--ink-faint); margin-left: 5px; font-size: 11px; }
+  .rb-snap { flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 8px; font-size: 12px; color: var(--ink-dim); }
+  .rb-snap select { background: var(--bg-raised); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; font: 12px var(--sans); padding: 3px 6px; max-width: 210px; }
+  .rb-snap .rev { font-family: var(--mono); color: var(--ink-faint); font-size: 11px; }
+
+  /* stock-style header row (root path + reload) */
+  .rb-pathrow { flex: none; display: flex; align-items: center; gap: 6px; padding: 2px 12px 6px; font: 11.5px var(--mono); color: var(--ink-faint); border-bottom: 1px solid var(--line); }
+  .rb-pathrow .last { color: var(--ink-dim); }
+
+  .rb-list { flex: 1; overflow-y: auto; padding: 4px 0 12px; }
+
+  /* changeset list rows */
+  .groupln { display: flex; align-items: center; gap: 6px; padding: 4px 10px 2px 8px; color: var(--ink-dim); font-size: 11.5px; cursor: pointer; user-select: none; }
+  .groupln:hover { color: var(--ink); }
+  .groupln .chev { font-size: 9px; color: var(--ink-faint); width: 10px; }
+  .groupln .roll { margin-left: auto; font: 10.5px var(--mono); }
+  .groupln .roll b { font-weight: 600; }
+  .crow { display: flex; align-items: center; gap: 8px; padding: 3.5px 10px 3.5px 26px; cursor: pointer; border-radius: 6px; margin: 0 4px; }
+  .crow:hover { background: var(--bg-hover); }
+  .crow.sel { background: var(--bg-active); }
+  .crow .name { font-family: var(--mono); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .crow .name .old { color: var(--ink-faint); }
+  .crow .delta { margin-left: auto; font: 11px var(--mono); color: var(--ink-faint); white-space: nowrap; }
+  .crow .delta .a { color: var(--st-a); }
+  .crow .delta .d { color: var(--st-d); }
+  .stletter { font: 700 11px var(--mono); width: 12px; text-align: center; flex: none; }
+  .stletter.M { color: var(--st-m); } .stletter.A { color: var(--st-a); }
+  .stletter.D { color: var(--st-d); } .stletter.R { color: var(--st-r); }
+
+  /* stock tree rows (Files segment) */
+  .trow { display: flex; align-items: center; gap: 7px; padding: 3px 10px 3px 8px; cursor: pointer; border-radius: 6px; margin: 0 4px; }
+  .trow:hover { background: var(--bg-hover); }
+  .trow.sel { background: var(--bg-active); }
+  .trow .chev { font-size: 9px; color: var(--ink-faint); width: 10px; flex: none; }
+  .trow .fico { flex: none; font-size: 13px; }
+  .trow .name { font-family: var(--mono); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .trow .meta { margin-left: auto; font-size: 10.5px; color: var(--ink-faint); white-space: nowrap; padding-left: 8px; }
+
+  /* preview tab (clean files) */
+  .preview-chips { flex: none; display: flex; gap: 4px; align-items: center; padding: 0 12px 6px; }
+  .chip { display: flex; align-items: center; gap: 6px; background: var(--bg-raised); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; font: 11.5px var(--mono); color: var(--ink-dim); }
+  .chip .x { cursor: pointer; color: var(--ink-faint); }
+  .chip .x:hover { color: var(--ink); }
+  .preview-body { flex: 1; overflow-y: auto; margin: 0 12px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-frame); padding: 12px 14px; font-size: 12.5px; }
+  .preview-body h1 { font-size: 17px; margin: 0 0 8px; }
+  .preview-body code { font-family: var(--mono); font-size: 11.5px; background: var(--bg-raised); padding: 1px 4px; border-radius: 4px; }
+  .preview-body pre { font: 11.5px/1.55 var(--mono); background: var(--bg-raised); padding: 8px 10px; border-radius: 6px; overflow-x: auto; }
+
+  /* ================= mock controls ================= */
+  #mockbar { position: fixed; left: 64px; bottom: 14px; z-index: 50; display: flex; align-items: center; gap: 10px; background: rgba(27,28,33,.92); border: 1px solid var(--line-strong); border-radius: 10px; padding: 8px 12px; backdrop-filter: blur(6px); box-shadow: 0 6px 24px rgba(0,0,0,.4); }
+  #mockbar .lbl { font-size: 11px; color: var(--ink-faint); }
+  #mockbar .note { font-size: 11px; color: var(--ink-faint); max-width: 340px; line-height: 1.4; }
+</style>
+</head>
+<body class="layout-swap">
+
+<div id="frame">
+  <!-- ============ sidebar rail (decorative) ============ -->
+  <div id="rail">
+    <div class="rail-btn" title="Sessions">☰</div>
+    <div class="rail-btn" title="Chat">💬</div>
+    <div class="rail-btn" title="Files (filestab)">🗂</div>
+    <div class="rail-btn" title="Settings">⚙</div>
+    <div class="rail-spacer"></div>
+    <div class="rail-btn" title="You">J</div>
+  </div>
+
+  <!-- ============ center ============ -->
+  <div id="center">
+    <div id="viewerPane">
+      <div id="viewer">
+        <div class="viewer-head">
+          <button class="back" id="btnBack">← <span>chat</span></button>
+          <span class="vsnap" id="vSnap"></span>
+          <span class="st" id="vSt"></span>
+          <span class="vpath" id="vPath"></span>
+          <span class="vdelta" id="vDelta"></span>
+          <div class="vhead-right">
+            <div class="seg" id="segScope">
+              <button data-v="file" class="on">This file</button>
+              <button data-v="set">Whole set</button>
+            </div>
+            <div class="seg" id="segLayout">
+              <button data-v="sb" class="on">Side by side</button>
+              <button data-v="un">Unified</button>
+            </div>
+          </div>
+        </div>
+        <div class="diff-scroll" id="diffScroll"></div>
+      </div>
+    </div>
+    <div id="splitBar"></div>
+    <div id="chatPane">
+      <div class="chat-scroll"><div class="chat-inner">
+        <div class="bubble user"><div class="who">you</div>the changes pane populated — what do we ship?</div>
+        <div class="bubble assistant"><div class="who">agent</div>Everything is green: the host fix is deployed, the fence answers cleanly, and all 8 suites pass. Ready to cut the commit whenever you are.</div>
+        <div class="bubble user"><div class="who">you</div>ok, so back to filestab…</div>
+        <div class="bubble assistant"><div class="who">agent</div>Happy to. What are you thinking about the shape of it?</div>
+      </div></div>
+      <div class="chat-input"><div class="box">Message the agent…</div></div>
+    </div>
+  </div>
+
+  <!-- ============ right bar ============ -->
+  <div id="rightbar">
+    <div id="rbResize"></div>
+    <div class="rb-head">
+      <span class="rb-title">Files</span>
+      <button class="icon-btn" title="Reload">⟳</button>
+    </div>
+    <div class="rb-segs">
+      <div class="seg" id="segCap">
+        <button data-v="changes" class="on">Changes<span class="n" id="nChanges"></span></button>
+        <button data-v="files">Files</button>
+      </div>
+    </div>
+    <div class="rb-snap">
+      <span>Viewing</span>
+      <select id="snapSel">
+        <option value="worktree">current state</option>
+        <option value="c1">969e71 add vcs layer</option>
+        <option value="c2">4b1c02 initial import</option>
+      </select>
+      <span class="rev" id="snapRev"></span>
+    </div>
+    <div class="rb-pathrow"><span>~/dev/tools/agent-stuff/</span><span class="last">filestab</span></div>
+    <div class="rb-list" id="rbList"></div>
+    <div class="preview-chips" id="previewChips" style="display:none"></div>
+    <div class="preview-body" id="previewBody" style="display:none"></div>
+  </div>
+</div>
+
+<!-- ============ mock controls ============ -->
+<div id="mockbar">
+  <span class="lbl">MOCK — viewer home:</span>
+  <div class="seg" id="segMockLayout">
+    <button data-v="swap" class="on">Main swap</button>
+    <button data-v="split">Split above chat</button>
+  </div>
+  <span class="note" id="mockNote">Main swap: the diff takes over the whole center column (works on today's dsh via selectPanel). Split: the proposed dsh feature — viewer above chat, draggable divider.</span>
+</div>
+
+<script>
+"use strict";
+/* =====================================================================
+ * DATA — edit here to iterate.
+ * Changesets per snapshot; the full tree; diffs per file (line model:
+ * t: c=ctx, a=add, d=del ; o=old line no, n=new line no, s=source text).
+ * ===================================================================== */
+const CHANGES = {
+  worktree: [
+    { g: "src/" },
+    { path: "src/index.ts", status: "M", add: 42, del: 7 },
+    { path: "src/diff/cells.ts", status: "A", add: 120, del: 0 },
+    { path: "src/dsh/client.tsx", status: "M", add: 38, del: 12 },
+    { path: "src/legacy-preview.tsx", status: "D", add: 0, del: 340 },
+    { path: "src/diff/parse.ts", status: "R", add: 6, del: 2, oldPath: "src/parse.ts" },
+    { g: "test/" },
+    { path: "test/diff-goldens.mjs", status: "A", add: 210, del: 0 },
+    { g: "" },
+    { path: "README.md", status: "M", add: 3, del: 1 },
+  ],
+  c1: [
+    { g: "src/" },
+    { path: "src/jj.ts", status: "A", add: 180, del: 0 },
+    { path: "src/git.ts", status: "A", add: 140, del: 0 },
+    { path: "src/containment.ts", status: "A", add: 64, del: 0 },
+    { g: "" },
+    { path: "src/index.ts", status: "A", add: 95, del: 0 },
+  ],
+  c2: [
+    { g: "" },
+    { path: "README.md", status: "A", add: 40, del: 0 },
+    { path: "package.json", status: "A", add: 22, del: 0 },
+    { path: "src/index.ts", status: "A", add: 12, del: 0 },
+  ],
+};
+
+const TREE = [ // [name, type, meta?, status?, children?]
+  { name: "src", type: "dir", open: true, children: [
+    { name: "diff", type: "dir", open: false, children: [
+      { name: "cells.ts", type: "file", meta: "ts · 3.1 KB", status: "A" },
+      { name: "parse.ts", type: "file", meta: "ts · 8.4 KB", status: "R" },
+    ]},
+    { name: "dsh", type: "dir", open: false, children: [
+      { name: "client.tsx", type: "file", meta: "tsx · 112 KB", status: "M" },
+    ]},
+    { name: "index.ts", type: "file", meta: "ts · 14 KB", status: "M" },
+    { name: "jj.ts", type: "file", meta: "ts · 6.2 KB" },
+    { name: "git.ts", type: "file", meta: "ts · 5.1 KB" },
+    { name: "containment.ts", type: "file", meta: "ts · 2.0 KB" },
+    { name: "legacy-preview.tsx", type: "file", meta: "tsx · 9.8 KB", status: "D" },
+  ]},
+  { name: "test", type: "dir", open: false, children: [
+    { name: "client.test.mjs", type: "file", meta: "js · 18 KB" },
+    { name: "diff-goldens.mjs", type: "file", meta: "js · 7.2 KB", status: "A" },
+    { name: "host.test.mjs", type: "file", meta: "js · 6.1 KB" },
+  ]},
+  { name: "dist", type: "dir", open: false, children: [
+    { name: "index.js", type: "file", meta: "js · 48 KB" },
+  ]},
+  { name: "README.md", type: "file", meta: "md · 6.4 KB", status: "M" },
+  { name: "package.json", type: "file", meta: "json · 1.2 KB" },
+  { name: "dsh.cordis.yml", type: "file", meta: "yaml · 240 B" },
+  { name: "tsconfig.json", type: "file", meta: "json · 480 B" },
+  { name: "pnpm-lock.yaml", type: "file", meta: "yaml · 84 KB" },
+];
+
+const ICON = {
+  dir: "📁", file: "•",
+};
+const FILE_ICON = (n) => {
+  const e = n.split(".").pop().toLowerCase();
+  if (e === "ts" || e === "tsx") return "🟦";
+  if (e === "js" || e === "mjs") return "🟨";
+  if (e === "md") return "📘";
+  if (e === "json" || e === "yml" || e === "yaml") return "⚙️";
+  return "•";
+};
+
+const DIFFS = {
+  "src/index.ts": {
+    st: "M", add: 42, del: 7,
+    lines: [
+      { t: "c", o: 58, n: 58, s: "    try {" },
+      { t: "c", o: 59, n: 59, s: "      const webServer = ctx.get(\"webServer\");" },
+      { t: "c", o: 60, n: 60, s: "      if (webServer === undefined) return;" },
+      { t: "d", o: 61, s: "      const reject = connection.requestRejection;" },
+      { t: "d", o: 62, s: "      if (typeof reject !== \"function\") return;" },
+      { t: "a", n: 61, s: "      // `requestRejection` reads instance state (`trustedHosts`," },
+      { t: "a", n: 62, s: "      // `browserAuth`) — it must run with the connection as `this`." },
+      { t: "a", n: 63, s: "      if (typeof connection.requestRejection !== \"function\") {" },
+      { t: "a", n: 64, s: "        log(\"error\", \"vcstab: requestRejection missing\");" },
+      { t: "a", n: 65, s: "        return;" },
+      { t: "a", n: 66, s: "      }" },
+      { t: "a", n: 67, s: "      const reject = (req) => connection.requestRejection(req);" },
+      { t: "c", o: 63, n: 68, s: "      webServer.register({" },
+      { t: "c", o: 64, n: 69, s: "        kind: \"prefix\"," },
+      { t: "c", o: 65, n: 70, s: "        path: BROWSE_CHANNEL," },
+    ],
+  },
+  "src/diff/cells.ts": {
+    st: "A", add: 120, del: 0,
+    lines: [
+      { t: "a", n: 1, s: "// Side-by-side cell alignment: pair deletions with insertions" },
+      { t: "a", n: 2, s: "// per hunk so the two panes stay line-synced." },
+      { t: "a", n: 3, s: "export interface Cell { side: \"old\" | \"new\" | \"ctx\";" },
+      { t: "a", n: 4, s: "  no: number | null; text: string | null }" },
+      { t: "a", n: 5, s: "" },
+      { t: "a", n: 6, s: "export function buildCells(rows: DiffRow[]): { left: Cell[]; right: Cell[] } {" },
+      { t: "a", n: 7, s: "  const left: Cell[] = [], right: Cell[] = [];" },
+      { t: "a", n: 8, s: "  for (const r of rows) {" },
+      { t: "a", n: 9, s: "    if (r.kind === \"ctx\") { left.push(ctxCell(r)); right.push(ctxCell(r)); }" },
+      { t: "a", n: 10, s: "    else { // pair dels/ins within the run, blanks absorb the overflow" },
+      { t: "a", n: 11, s: "      pairRun(r, left, right);" },
+      { t: "a", n: 12, s: "    }" },
+      { t: "a", n: 13, s: "  }" },
+      { t: "a", n: 14, s: "  return { left, right };" },
+      { t: "a", n: 15, s: "}" },
+    ],
+  },
+  "src/dsh/client.tsx": {
+    st: "M", add: 38, del: 12,
+    lines: [
+      { t: "c", o: 40, n: 40, s: "const BROWSE_CHANNEL = \"/filestab-browse\";" },
+      { t: "d", o: 41, s: "const NS = \"files\";" },
+      { t: "a", n: 41, s: "const NS = \"filestab\";" },
+      { t: "a", n: 42, s: "const VCS_POLL_MS = 5000;" },
+      { t: "c", o: 42, n: 43, s: "const TEXT_PREVIEW_CAP = 1024 * 1024;" },
+      { t: "c", o: 43, n: 44, s: "" },
+      { t: "d", o: 44, s: "// old tree state (replaced by the stock-style lazy tree)" },
+      { t: "d", o: 45, s: "const [tree, setTree] = React.useState<Entry[]>([]);" },
+      { t: "a", n: 45, s: "// the changeset list is the scanning surface; the stock tree" },
+      { t: "a", n: 46, s: "// is the browse surface — one viewer serves both." },
+    ],
+  },
+  "src/legacy-preview.tsx": {
+    st: "D", add: 0, del: 340,
+    lines: [
+      { t: "d", o: 1, s: "// retired: markdown + mermaid + highlight preview stack." },
+      { t: "d", o: 2, s: "// Live-file preview now goes to the built-in `file:` viewer." },
+      { t: "d", o: 3, s: "export function LegacyPreview(props: PreviewProps) {" },
+      { t: "d", o: 4, s: "  const [html, setHtml] = React.useState<string>(\"\");" },
+      { t: "d", o: 5, s: "  React.useEffect(() => { void renderMarkdown(props.text).then(setHtml); }, [props.text]);" },
+      { t: "d", o: 6, s: "  return <iframe sandbox=\"\" srcDoc={makeDoc(html)} />;" },
+      { t: "d", o: 7, s: "}" },
+    ],
+  },
+  "src/diff/parse.ts": {
+    st: "R", add: 6, del: 2, oldPath: "src/parse.ts",
+    lines: [
+      { t: "c", o: 1, n: 1, s: "// unified-patch parser: hunk headers, line numbers, content guards." },
+      { t: "d", o: 2, s: "export function parseDiff(patch: unknown): DiffFile[] {" },
+      { t: "a", n: 2, s: "export function parseDiff(patch: unknown, opts?: ParseOpts): DiffFile[] {" },
+      { t: "c", o: 3, n: 3, s: "  const text = typeof patch === \"string\" ? patch : String(patch ?? \"\");" },
+      { t: "c", o: 4, n: 4, s: "  const files: DiffFile[] = [];" },
+      { t: "a", n: 5, s: "  const trustHunkCounts = opts?.trustHunkCounts ?? false;" },
+      { t: "c", o: 5, n: 6, s: "  for (const line of text.split(\"\\n\")) {" },
+    ],
+  },
+  "test/diff-goldens.mjs": {
+    st: "A", add: 210, del: 0,
+    lines: [
+      { t: "a", n: 1, s: "// parseDiff goldens: modify, add, delete, rename, rename+mod," },
+      { t: "a", n: 2, s: "// binary, chmod, no-newline-at-eof, CRLF, space-only hunks." },
+      { t: "a", n: 3, s: "import assert from \"node:assert\";" },
+      { t: "a", n: 4, s: "import { parseDiff } from \"../dist/index.js\";" },
+      { t: "a", n: 5, s: "" },
+      { t: "a", n: 6, s: "assert.deepStrictEqual(parseDiff(\"diff --git a/x b/x\\n+x\").files[0].rows," },
+      { t: "a", n: 7, s: "  [{ kind: \"ins\", text: \"x\" }], \"single insertion\");" },
+    ],
+  },
+  "README.md": {
+    st: "M", add: 3, del: 1,
+    lines: [
+      { t: "c", o: 5, n: 5, s: "# filestab" },
+      { t: "d", o: 6, s: "A read-only Files tab for the dsh web GUI." },
+      { t: "a", n: 6, s: "A full replacement for the stock Files feature — the same tree," },
+      { t: "a", n: 7, s: "with jj/git change tracking, diffs, and snapshot mode woven in." },
+      { t: "c", o: 7, n: 8, s: "" },
+    ],
+  },
+  "src/jj.ts": { st: "A", add: 180, del: 0, lines: [
+    { t: "a", n: 1, s: "// jj backend: worktree status, per-file diff, history, rev trees." },
+    { t: "a", n: 2, s: "export async function jjWorkspaceStatus(ws: Workspace) {" },
+    { t: "a", n: 3, s: "  const [head, summary] = await Promise.all([" },
+    { t: "a", n: 4, s: "    jj(ws, [\"log\", \"--no-graph\", \"-r\", \"@\", \"-T\", headTemplate])," },
+    { t: "a", n: 5, s: "    jj(ws, [\"status\", \"--ignore-worktree-file\"])," },
+    { t: "a", n: 6, s: "  ]);" },
+  ]},
+  "src/git.ts": { st: "A", add: 140, del: 0, lines: [
+    { t: "a", n: 1, s: "// git backend for git-only repos: status, diff, history, rev trees." },
+    { t: "a", n: 2, s: "export async function gitWorkspaceStatus(ws: Workspace) {" },
+    { t: "a", n: 3, s: "  const [head, summary] = await Promise.all([" },
+    { t: "a", n: 4, s: "    git(ws, [\"log\", \"-1\", \"--format=%h %s\"])," },
+    { t: "a", n: 5, s: "    git(ws, [\"status\", \"--porcelain=v1\"])," },
+    { t: "a", n: 6, s: "  ]);" },
+  ]},
+  "src/containment.ts": { st: "A", add: 64, del: 0, lines: [
+    { t: "a", n: 1, s: "// Workspace containment: every host path is resolved and re-checked" },
+    { t: "a", n: 2, s: "// against the session's sandbox workspace root." },
+    { t: "a", n: 3, s: "export class WorkspacePathError extends Error {}" },
+    { t: "a", n: 4, s: "export function resolveContained(root: string, rel: string): string {" },
+  ]},
+  "package.json": { st: "A", add: 22, del: 0, lines: [
+    { t: "a", n: 1, s: "{ \"name\": \"filestab\", \"version\": \"0.1.0\", \"main\": \"./dist/index.js\" }" },
+  ]},
+};
+// synthetic content for files without hand-written diffs
+function synthDiff(f) {
+  if (DIFFS[f]) return DIFFS[f];
+  return { st: "M", add: 4, del: 2, lines: [
+    { t: "c", o: 1, n: 1, s: "// (mock content for " + f + ")" },
+    { t: "d", o: 2, s: "const old = true;" },
+    { t: "a", n: 2, s: "const updated = true;" },
+    { t: "c", o: 3, n: 3, s: "export {};" },
+  ]};
+}
+
+const PREVIEW = {
+  "README.md": "<h1>filestab</h1><p>A read-only <b>Files</b> tab for the <a href='#'>dsh</a> web GUI — live change tracking for jj and git, side-by-side diffs, file previews.</p><pre>npm run build &amp;&amp; dsh plugin --profile web add filestab</pre>",
+  "package.json": "<pre>{\n  \"name\": \"filestab\",\n  \"version\": \"0.1.0\",\n  \"main\": \"./dist/index.js\"\n}</pre>",
+  "src/jj.ts": "<pre>// jj backend: worktree status, per-file diff, history, rev trees.</pre>",
+};
+
+/* =====================================================================
+ * STATE
+ * ===================================================================== */
+const S = {
+  cap: "changes",          // right-bar segment: changes | files
+  snap: "worktree",        // snapshot
+  sel: "src/index.ts",     // selected changed file
+  selClean: null,          // selected clean file (preview chip)
+  scope: "file",           // viewer: file | set
+  layout: "sb",            // viewer: sb | un
+  home: "swap",            // mock: swap | split
+  viewerOpen: false,
+  collapsedGroups: new Set(),
+};
+
+/* =====================================================================
+ * HELPERS
+ * ===================================================================== */
+const $ = (id) => document.getElementById(id);
+const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+function changes() { return CHANGES[S.snap] || []; }
+function flatChanges() { return changes().filter((c) => c.path !== undefined); }
+function findChange(p) { return flatChanges().find((c) => c.path === p); }
+
+/* =====================================================================
+ * RIGHT BAR RENDER
+ * ===================================================================== */
+function rollFor(groupPath) {
+  const r = { M: 0, A: 0, D: 0, R: 0 };
+  for (const c of flatChanges()) {
+    if (groupPath === "" || c.path.startsWith(groupPath)) r[c.status] = (r[c.status] || 0) + 1;
+  }
+  return r;
+}
+function rollText(r) {
+  const parts = [];
+  if (r.M) parts.push(`<b style="color:var(--st-m)">M${r.M}</b>`);
+  if (r.A) parts.push(`<b style="color:var(--st-a)">A${r.A}</b>`);
+  if (r.D) parts.push(`<b style="color:var(--st-d)">D${r.D}</b>`);
+  if (r.R) parts.push(`<b style="color:var(--st-r)">R${r.R}</b>`);
+  return parts.join(" ");
+}
+
+function renderRB() {
+  $("nChanges").textContent = flatChanges().length;
+  $("snapRev").textContent = S.snap === "worktree" ? "@ vxoznlqo" : { c1: "969e71", c2: "4b1c02" }[S.snap];
+  const list = $("rbList");
+  list.innerHTML = "";
+  if (S.cap === "changes") renderChangesList(list);
+  else renderTree(list);
+  renderPreview();
+}
+
+function renderChangesList(list) {
+  let group = null, groupEl = null;
+  for (const item of changes()) {
+    if (item.g !== undefined) {
+      group = item.g;
+      const collapsed = S.collapsedGroups.has(group);
+      const r = rollFor(group);
+      const total = r.M + r.A + r.D + (r.R || 0);
+      groupEl = document.createElement("div");
+      groupEl.className = "groupln";
+      groupEl.innerHTML = `<span class="chev">${collapsed ? "▸" : "▾"}</span><span>${esc(group)}</span><span class="roll">${rollText(r)}</span>`;
+      groupEl.onclick = () => {
+        if (S.collapsedGroups.has(group)) S.collapsedGroups.delete(group);
+        else S.collapsedGroups.add(group);
+        renderRB();
+      };
+      list.appendChild(groupEl);
+      if (collapsed) { list.appendChild(el("div", "faint", `  ${total} changed file${total === 1 ? "" : "s"}`, { style: "padding:0 26px 3px; font-size:11px;" })); continue; }
+      continue;
+    }
+    const c = item;
+    const row = el("div", "crow" + (S.sel === c.path ? " sel" : ""));
+    const nm = c.oldPath ? `<span class="old">${esc(c.oldPath)} → </span>${esc(c.path.split("/").pop())}` : esc(c.path.split("/").pop());
+    row.innerHTML = `<span class="stletter ${c.status}">${c.status}</span><span class="name" title="${esc(c.path)}">${nm}</span>` +
+      `<span class="delta"><span class="a">+${c.add}</span> <span class="d">−${c.del}</span></span>`;
+    row.onclick = () => openChanged(c.path);
+    list.appendChild(row);
+  }
+}
+
+function el(tag, cls, html, attrs = {}) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  e.innerHTML = html;
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  return e;
+}
+
+function renderTree(list) {
+  const walk = (nodes, depth) => {
+    for (const n of nodes) {
+      const pad = 8 + depth * 14;
+      if (n.type === "dir") {
+        const row = el("div", "trow");
+        row.style.paddingLeft = pad + "px";
+        row.innerHTML = `<span class="chev">${n.open ? "▾" : "▸"}</span><span class="fico">${n.open ? "📂" : "📁"}</span><span class="name">${esc(n.name)}/</span>`;
+        row.onclick = (e) => { e.stopPropagation(); n.open = !n.open; renderRB(); };
+        list.appendChild(row);
+        if (n.open) walk(n.children || [], depth + 1);
+      } else {
+        const row = el("div", "trow" + (S.selClean === n.name ? " sel" : ""));
+        row.style.paddingLeft = pad + "px";
+        const st = n.status ? `<span class="stletter ${n.status}" style="margin-left:auto">${n.status}</span>` : "";
+        row.innerHTML = `<span class="fico" style="font-size:10px; opacity:.7">${FILE_ICON(n.name)}</span><span class="name">${esc(n.name)}</span>${st}<span class="meta">${esc(n.meta || "")}</span>`;
+        row.onclick = (e) => {
+          e.stopPropagation();
+          const full = pathOfNode(n);
+          if (n.status) openChanged(full);
+          else { S.selClean = n.name; S.selCleanPath = full; renderRB(); }
+        };
+        list.appendChild(row);
+      }
+    }
+  };
+  walk(TREE, 0);
+}
+// resolve a tree node to its repo path (mock: names are flat enough)
+let _walkStack = [];
+function pathOfNode(node) {
+  const find = (nodes, trail) => {
+    for (const n of nodes) {
+      if (n === node) return [...trail, n.name].join("/");
+      if (n.children) { const r = find(n.children, [...trail, n.name]); if (r) return r; }
+    }
+    return null;
+  };
+  return find(TREE, []) || node.name;
+}
+
+function renderPreview() {
+  const has = S.selClean !== null;
+  $("previewChips").style.display = has ? "flex" : "none";
+  $("previewBody").style.display = has ? "block" : "none";
+  if (!has) return;
+  const p = S.selCleanPath || S.selClean;
+  $("previewChips").innerHTML = `<span class="chip">📄 ${esc(S.selClean)} <span class="x" id="chipX">✕</span></span>`;
+  $("chipX").onclick = () => { S.selClean = null; S.selCleanPath = null; renderRB(); };
+  $("previewBody").innerHTML = PREVIEW[p] || `<p class="dim">(mock preview of ${esc(p)})</p>`;
+}
+
+/* =====================================================================
+ * VIEWER (main-area occupant)
+ * ===================================================================== */
+function openChanged(path) {
+  S.sel = path;
+  S.viewerOpen = true;
+  renderAll();
+}
+function closeViewer() {
+  S.viewerOpen = false;
+  renderAll();
+}
+function renderViewer() {
+  const v = $("viewer");
+  if (!S.viewerOpen) { v.classList.remove("show"); return; }
+  v.classList.add("show");
+  const f = findChange(S.sel);
+  const d = synthDiff(S.sel);
+  $("vSt").textContent = d.st; $("vSt").className = "st " + d.st;
+  $("vPath").innerHTML = d.oldPath ? `<span class="old">${esc(d.oldPath)} → </span>${esc(S.sel)}` : esc(S.sel);
+  $("vDelta").innerHTML = `<span class="a">+${d.add}</span> <span class="d">−${d.del}</span>`;
+  $("vSnap").textContent = S.snap === "worktree" ? "vs @" : "vs " + { c1: "root", c2: "—" }[S.snap];
+  // chrome visibility
+  $("btnBack").querySelector("span").textContent = S.home === "split" ? "close" : "chat";
+  $("segScope").style.display = S.scope === "set" ? "flex" : "flex";
+  renderDiff();
+}
+
+function diffRowUnified(d) {
+  let h = "";
+  for (const r of d.lines) {
+    const cls = r.t === "a" ? "add" : r.t === "d" ? "del" : "";
+    h += `<div class="drow ${cls}"><span class="ln">${r.o ?? ""}</span><span class="ln" style="border-right:1px solid var(--line)">${r.n ?? ""}</span><span class="code">${esc(r.s)}</span></div>`;
+  }
+  return h;
+}
+function diffTableSB(d) {
+  // pair del/ins runs into aligned rows
+  const rows = [];
+  let i = 0;
+  while (i < d.lines.length) {
+    const r = d.lines[i];
+    if (r.t === "c") { rows.push({ left: { no: r.o, s: r.s }, right: { no: r.n, s: r.s } }); i++; continue; }
+    // gather the run
+    const dels = [], ins = [];
+    while (i < d.lines.length && d.lines[i].t !== "c") {
+      if (d.lines[i].t === "d") dels.push(d.lines[i]); else ins.push(d.lines[i]);
+      i++;
+    }
+    const m = Math.max(dels.length, ins.length);
+    for (let k = 0; k < m; k++) {
+      rows.push({
+        left: dels[k] ? { no: dels[k].o, s: dels[k].s, cls: "del" } : { no: null, s: null },
+        right: ins[k] ? { no: ins[k].n, s: ins[k].s, cls: "add" } : { no: null, s: null },
+      });
+    }
+  }
+  let h = "<table class='sb'><tbody>";
+  for (const r of rows) {
+    const l = r.left, rt = r.right;
+    h += `<tr class="${l.cls || ""} ${rt.cls || ""}">` +
+      `<td class="ln ${l.cls ? "del" : ""}">${l.no ?? ""}</td>` +
+      `<td class="side oldside ${l.cls || ""}">${l.s === null ? "" : esc(l.s)}</td>` +
+      `<td class="ln ${rt.cls ? "add" : ""}">${rt.no ?? ""}</td>` +
+      `<td class="side newside ${rt.cls || ""}">${rt.s === null ? "" : esc(rt.s)}</td></tr>`;
+  }
+  return h + "</tbody></table>";
+}
+
+function renderDiff() {
+  const scroll = $("diffScroll");
+  const mode = S.layout;
+  if (S.scope === "set") {
+    // whole-set: every changed file as a section with sticky header + TOC
+    const files = flatChanges();
+    let h = "";
+    for (const f of files) {
+      const d = synthDiff(f.path);
+      h += `<div class="fsection" id="sec-${f.path.replace(/[^a-zA-Z0-9]/g, "_")}">` +
+        `<div class="fhead"><span class="st ${d.st}">${d.st}</span><span class="vpath">${d.oldPath ? `<span class="old">${esc(d.oldPath)} → </span>` : ""}${esc(f.path)}</span>` +
+        `<span class="vdelta"><span class="a">+${d.add}</span> <span class="d">−${d.del}</span></span>` +
+        `<span class="faint" style="margin-left:auto; font-size:11px; cursor:pointer" data-focus="${f.path}">focus →</span></div>` +
+        `<div class="fbody">${mode === "sb" ? diffTableSB(d) : diffRowUnified(d)}</div></div>`;
+    }
+    scroll.innerHTML = h;
+    buildTOC(files);
+  } else {
+    const d = synthDiff(S.sel);
+    scroll.innerHTML = mode === "sb" ? diffTableSB(d) : diffRowUnified(d);
+    scroll.querySelectorAll("[data-focus]").forEach((b) => b.onclick = () => { S.sel = b.dataset.focus; S.scope = "file"; syncSegs(); renderAll(); });
+    if (mode === "un") { /* single-file unified: no TOC */ }
+    else scroll.querySelectorAll("[data-focus]").forEach((b) => b.onclick = () => { S.sel = b.dataset.focus; renderAll(); });
+    scroll.scrollTop = 0;
+  }
+}
+
+let tocFiles = [];
+function tocPlace() {
+  const scroll = $("diffScroll");
+  const s = scroll.querySelector(".toc-strip");
+  if (!s) return;
+  const st = scroll.scrollTop, sh = scroll.scrollHeight, ch = scroll.clientHeight;
+  const max = Math.max(1, ch - 24);
+  for (const f of tocFiles) {
+    const sec = scroll.querySelector(`#sec-${f.path.replace(/[^a-zA-Z0-9]/g, "_")}`);
+    if (!sec) continue;
+    const top = sec.offsetTop - st;
+    const dot = s.querySelector(`[data-p="${f.path}"]`);
+    if (!dot) continue;
+    const y = Math.max(12, Math.min(max, top * (max / Math.max(1, sh - ch))));
+    dot.style.top = y + "px";
+    dot.classList.toggle("cur", top <= 2 && top > -sec.offsetHeight);
+  }
+}
+function buildTOC(files) {
+  tocFiles = files;
+  const scroll = $("diffScroll");
+  const old = scroll.querySelector(".toc-strip"); if (old) old.remove();
+  const strip = el("div", "toc-strip");
+  // one scroll listener per element, for the life of the mockup
+  if (!scroll._tocBound) { scroll._tocBound = true; scroll.addEventListener("scroll", tocPlace); }
+  for (const f of files) {
+    const d = synthDiff(f.path);
+    const dot = el("div", "toc-dot", "");
+    dot.dataset.p = f.path;
+    dot.title = f.path;
+    dot.style.background = `var(--st-${d.st.toLowerCase()})`;
+    dot.onclick = () => {
+      const sec = scroll.querySelector(`#sec-${f.path.replace(/[^a-zA-Z0-9]/g, "_")}`);
+      sec && sec.scrollIntoView({ behavior: "smooth" });
+    };
+    strip.appendChild(dot);
+  }
+  scroll.appendChild(strip);
+  tocPlace();
+}
+
+/* =====================================================================
+ * LAYOUT (mock: swap vs split) + resizers
+ * ===================================================================== */
+function renderLayout() {
+  document.body.classList.toggle("layout-split", S.home === "split");
+  if (S.home === "swap") {
+    $("chatPane").classList.toggle("hidden", S.viewerOpen);
+    $("viewerPane").classList.toggle("collapsed", !S.viewerOpen);
+  } else {
+    $("chatPane").classList.remove("hidden");
+    $("viewerPane").classList.toggle("collapsed", !S.viewerOpen);
+  }
+}
+// split divider drag
+(function () {
+  const bar = $("splitBar");
+  let dragging = false;
+  bar.addEventListener("mousedown", (e) => { dragging = true; bar.classList.add("drag"); e.preventDefault(); });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const center = $("center").getBoundingClientRect();
+    const h = e.clientY - center.top;
+    const min = 120, max = center.height - 120;
+    $("viewerPane").style.flex = "none";
+    $("viewerPane").style.height = Math.max(min, Math.min(max, h)) + "px";
+  });
+  window.addEventListener("mouseup", () => { dragging = false; bar.classList.remove("drag"); });
+})();
+// rightbar width drag
+(function () {
+  const bar = $("rbResize");
+  let dragging = false;
+  bar.addEventListener("mousedown", (e) => { dragging = true; bar.classList.add("drag"); e.preventDefault(); });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const w = window.innerWidth - e.clientX;
+    $("rightbar").style.width = Math.max(280, Math.min(620, w)) + "px";
+  });
+  window.addEventListener("mouseup", () => { dragging = false; bar.classList.remove("drag"); });
+})();
+
+/* =====================================================================
+ * SEGMENT CONTROLS
+ * ===================================================================== */
+function syncSegs() {
+  for (const [id, val, key] of [
+    ["segCap", S.cap, "cap"], ["segScope", S.scope, "scope"], ["segLayout", S.layout, "layout"], ["segMockLayout", S.home, "home"],
+  ]) {
+    $(id).querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.v === val));
+  }
+}
+$("segCap").onclick = (e) => { const b = e.target.closest("button"); if (!b) return; S.cap = b.dataset.v; renderAll(); };
+$("segScope").onclick = (e) => { const b = e.target.closest("button"); if (!b) return; S.scope = b.dataset.v; renderAll(); };
+$("segLayout").onclick = (e) => { const b = e.target.closest("button"); if (!b) return; S.layout = b.dataset.v; renderAll(); };
+$("segMockLayout").onclick = (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  S.home = b.dataset.v;
+  $("mockNote").textContent = S.home === "swap"
+    ? "Main swap: the diff takes over the whole center column (works on today's dsh via selectPanel)."
+    : "Split: the proposed dsh feature — viewer above chat, draggable divider. Chat stays live underneath.";
+  renderAll();
+};
+$("snapSel").onchange = (e) => { S.snap = e.target.value; renderAll(); };
+$("btnBack").onclick = closeViewer;
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && S.viewerOpen) closeViewer();
+  // step through the changeset
+  if ((e.key === "ArrowDown" || e.key === "ArrowUp") && S.cap === "changes" && !e.target.closest("select,input")) {
+    e.preventDefault();
+    const files = flatChanges();
+    let i = files.findIndex((f) => f.path === S.sel);
+    i = e.key === "ArrowDown" ? Math.min(files.length - 1, i + 1) : Math.max(0, i - 1);
+    openChanged(files[i].path);
+  }
+});
+
+/* ===================================================================== */
+function renderAll() {
+  syncSegs();
+  renderRB();
+  renderViewer();
+  renderLayout();
+}
+renderAll();
+</script>
+</body>
+</html>

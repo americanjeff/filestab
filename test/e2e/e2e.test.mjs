@@ -37,7 +37,7 @@ const DSH_BIN = process.env.E2E_DSH || "dsh";
 // classes, the "Add workspace"/"Send message" button labels) -- that is not a
 // stable contract. When dsh is bumped this check fails on purpose: rework the
 // selectors against the new UI first, then bump DSH_VERSION.
-const DSH_VERSION = "0.1.1-rc.2";
+const DSH_VERSION = "0.1.5-rc.2";
 function checkDshVersion() {
   const actual = execFileSync(DSH_BIN, ["--version"], { encoding: "utf8" }).trim();
   assert.equal(actual, DSH_VERSION, `dsh version changed (${actual} != ${DSH_VERSION}): the e2e session-opening selectors ride on dsh's own UI and need reworking -- re-verify against the new build, then bump DSH_VERSION.`);
@@ -150,8 +150,15 @@ function bootDsh(home) {
     child.stdout.on("data", (d) => {
       log.push(d.toString());
       process.stdout.write(d.toString());
-      const m = d.toString().match(/dsh web: http:\/\/127\.0\.0\.1:(\d+)/);
-      if (m && !settled) { settled = true; clearTimeout(timer); res({ port: Number(m[1]), stop }); }
+      // 0.1.5 prints the browser URL with a one-time-auth token; the token
+      // exchanges for a persistent signed cookie on first load, and a fresh
+      // context (no cookie) re-uses the same token, so keep the FULL url.
+      const m = d.toString().match(/dsh web: (http:\/\/127\.0\.0\.1:\d+\S+)/);
+      if (m && !settled) {
+        settled = true;
+        clearTimeout(timer);
+        res({ port: Number(m[1].match(/:(\d+)/)[1]), url: m[1], stop });
+      }
     });
     child.stderr.on("data", (d) => {
       log.push(d.toString());
@@ -211,15 +218,18 @@ async function openSession(browser, { url, workspace }) {
     await page.waitForTimeout(3000);
     // A session only gets its conversation pane (with the view tabs) once a
     // turn exists; send one. This is the one real model call per workspace.
-    const ta = page.locator("textarea").first();
+    // 0.1.5: the composer is a contenteditable div (not a textarea) and the
+    // conversation view tabs (Chat / Trajectory / Files / …) mount after the
+    // first turn.
+    const ta = page.locator(".uV2eYG_input").last();
     await ta.waitFor({ state: "visible", timeout: 15_000 });
     await ta.click();
-    await ta.type("hello");
+    await ta.pressSequentially("hello");
     await page.getByRole("button", { name: "Send message" }).click();
     await page.waitForFunction(() => {
       const tl = document.querySelector('[role="tablist"]');
       return !!tl && [...tl.querySelectorAll('[role="tab"]')].some((t) => t.textContent.includes("Files"));
-    }, { timeout: 90_000 });
+    }, { timeout: 120_000 });
   } catch (e) {
     await context.close().catch(() => {});
     throw new Error(`openSession(${workspace}): ${e.message}`);
@@ -455,12 +465,28 @@ async function j6_imagePreview(u) {
 
 // J18: every path-escape shape is rejected; the outside symlink is listed
 // but its read is refused.
+//
+// Two surfaces, two shapes (both since v0.1.2):
+//  - a real `..` escape reaches the server's containment check and is
+//    rejected → the ERROR NOTE in the list area (workspace-invalid-path).
+//  - an absolute path and an encoded-escape text never reach the server as
+//    escapes: the crumb editor re-roots them under the workspace (the leading
+//    "/" drops, "%2F" stays a literal name), so they resolve to MISSING
+//    folders. Since BUG-009 a missing non-root folder recovers to the root
+//    listing with a short "no longer exists" note (auto-clears in 8 s)
+//    instead of latching a raw error — the pin is the note + the root
+//    listing, never an error note, and never escaped content.
 async function j18_containment(u) {
-  for (const p of ["../outside.txt", "/etc/passwd", "..%2F..%2Fetc%2Fpasswd"]) {
+  await editPath(u, "../outside.txt");
+  await u.until(async () => (await u.errorNote().count()) > 0 && ((await u.errorNote().innerText()).trim() !== ""), "reject ../outside.txt");
+  ok(!(await u.previewText()).includes("root:") && !(await u.previewText()).includes("secret"), "../outside.txt: no escaped content shown");
+  await backToRoot(u);
+
+  for (const p of ["/etc/passwd", "..%2F..%2Fetc%2Fpasswd"]) {
     await editPath(u, p);
-    await u.until(async () => (await u.errorNote().count()) > 0 && ((await u.errorNote().innerText()).trim() !== ""), `reject ${p}`);
+    await u.until(async () => (await u.root().locator(".dswFiles_status", { hasText: /no longer exists/ }).count()) > 0, `folder-gone note for ${p}`);
+    await u.until(async () => (await u.rowNames()).includes("a.txt"), `recovered at root after ${p}`);
     ok(!(await u.previewText()).includes("root:") && !(await u.previewText()).includes("secret"), `${p}: no escaped content shown`);
-    await backToRoot(u);
   }
   ok((await u.rowNames()).includes("sneaky"), "outside symlink is still listed");
   await u.row("sneaky").click();
@@ -471,25 +497,34 @@ async function j18_containment(u) {
 }
 
 // J19: the left pane (browse list) collapses to give the preview and diff the
-// full width; the toggle lives in the header so it stays reachable while the
-// pane is hidden, and the collapsed state persists across a reload.
+// full width. Since BUG-011 one affordance owns each state: the header
+// toggle is EXPANDED-only and the pane-edge rail (the "thickened divider")
+// is COLLAPSED-only — collapsing unmounts the header button and mounts the
+// rail; expanding (rail click) does the reverse. The collapsed state persists
+// across a reload.
 async function j19_collapse(u) {
   const btn = u.root().locator(".dswFiles_collapseBtn");
-  eq(await btn.count(), 1, "collapse toggle in the header");
+  const rail = u.root().locator(".dswFiles_collapsedRail");
+  eq(await btn.count(), 1, "collapse toggle in the header while expanded");
+  eq(await rail.count(), 0, "no rail while expanded");
   eq(await u.root().locator(".dswFiles_browsePane").count(), 1, "browse pane visible initially");
   await btn.click();
   eq(await u.root().locator(".dswFiles_browsePane").count(), 0, "browse pane hidden when collapsed");
   eq(await u.root().locator(".dswFiles_divider").count(), 0, "divider hidden when collapsed");
-  await btn.click();
+  eq(await btn.count(), 0, "header toggle unmounts while collapsed (BUG-011)");
+  eq(await rail.count(), 1, "pane-edge rail is the re-opener while collapsed (BUG-011)");
+  await rail.click();
   await u.until(async () => (await u.root().locator(".dswFiles_browsePane").count()) === 1, "browse pane restored");
+  eq(await rail.count(), 0, "rail unmounts when expanded");
   // Persistence: collapse, reload, still collapsed.
   await btn.click();
   await u.until(async () => (await u.root().locator(".dswFiles_browsePane").count()) === 0, "collapsed again");
   await u.page.reload({ waitUntil: "domcontentloaded" });
   await u.until(async () => (await u.root().count()) === 1, "Files tab back after reload", 30_000);
   eq(await u.root().locator(".dswFiles_browsePane").count(), 0, "collapsed state survives reload");
+  eq(await u.root().locator(".dswFiles_collapsedRail").count(), 1, "rail is the re-opener after reload");
   // Leave it expanded for any later journeys.
-  await btn.click();
+  await u.root().locator(".dswFiles_collapsedRail").click();
   await u.until(async () => (await u.root().locator(".dswFiles_browsePane").count()) === 1, "restored for later journeys");
 }
 
@@ -517,8 +552,8 @@ async function main() {
     const fx = makeFixtures(root);
     console.log(`e2e: scratch home ${home}`);
     dsh = await bootDsh(home);
-    const url = `http://127.0.0.1:${dsh.port}`;
-    console.log(`e2e: dsh web on ${url}`);
+    const url = dsh.url;
+    console.log(`e2e: dsh web on ${url.replace(/token=[^\s]+/, "token=…")}`);
     browser = await chromium.launch({ executablePath: findChrome(), headless: true, args: ["--no-sandbox"] });
 
     // F-JJ session: J1, J2, J3, J6, J18.

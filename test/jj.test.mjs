@@ -10,7 +10,7 @@ import { execFile } from "node:child_process";
 import assert from "node:assert";
 import { jj, parseSummary, parseHead, parseCommitLog, parseConflicts, insideWorkspace, jjWorkspaceStatus } from "../dist/jj.js";
 import { snapshotDirListing } from "../dist/snapshot.js";
-import { apply } from "../dist/index.js";
+import { __test } from "../dist/index.js";
 
 let n = 0;
 const ok = (cond, msg) => { assert.ok(cond, msg); n++; };
@@ -193,13 +193,11 @@ const stB2 = await jjWorkspaceStatus(ws, { force: true });
 }
 await writeFile(join(ws, "a.txt"), "l1\nl2 CHANGED\nl3\n");
 
-let capturedHandler = null;
 const plainWs = join(base, "plain");
 await mkdir(plainWs);
 await writeFile(join(plainWs, "x.txt"), "x");
 const ctx = {
   get(name) {
-    if (name === "connection") return { rpc: { handle: (ch, handler) => { capturedHandler = handler; } } };
     if (name === "sessions") return { get: (id) => ({ id, header: { cwd: id === "sess-2" ? plainWs : ws } }) };
     if (name === "sandboxPolicy") return { resolve: ({ session }) => ({ mode: "workspace-write", workspaceRoot: session?.header?.cwd }) };
     return undefined;
@@ -208,9 +206,7 @@ const ctx = {
   effect: (fn) => { fn(); },
   logger: { info() {}, error() {} },
 };
-apply(ctx);
-ok(typeof capturedHandler === "function", "browse handler captured");
-const call = (endpoint, payload) => capturedHandler(endpoint, payload);
+const call = (endpoint, payload) => __test.makeBrowseHandler(ctx)(endpoint, payload);
 
 // Dirty the worktree again, with files other than a.txt (the later
 // worktree-diff test expects a.txt's worktree patch to stay empty).

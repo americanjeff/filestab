@@ -9,7 +9,7 @@ import {
   gitCommitChanges, gitSnapshotListing, gitFileShow,
 } from "../dist/git.js";
 import { WorkspacePathError } from "../dist/containment.js";
-import { apply } from "../dist/index.js";
+import { __test } from "../dist/index.js";
 
 let n = 0;
 const ok = (cond, msg) => { assert.ok(cond, msg); n++; };
@@ -220,18 +220,15 @@ ok(cdNone.ok && cdNone.value === "", "file untouched by commit → empty patch (
 
 // Wire contract: every error code must be a legal member of the closed
 // union, or the client rejects the whole response.
-let gitHandler = null;
-apply({
+const gitCtx = {
   get(name) {
-    if (name === "connection") return { rpc: { handle: (ch, h) => { gitHandler = h; } } };
     if (name === "sessions") return { get: (id) => (id === "git-sess" ? { id, header: { cwd: ws } } : undefined) };
     if (name === "sandboxPolicy") return { resolve: ({ session }) => ({ mode: "workspace-write", workspaceRoot: session?.header?.cwd }) };
     return undefined;
   },
   on() {}, effect: (fn) => { fn(); }, logger: { info() {}, error() {} },
-});
-ok(typeof gitHandler === "function", "browse handler registered on the git repo");
-const gcall = (endpoint, payload) => gitHandler(endpoint, payload);
+};
+const gcall = (endpoint, payload) => __test.makeBrowseHandler(gitCtx)(endpoint, payload);
 {
   const r = await gcall("list", { sessionId: "git-sess", rev: midSha.slice(0, 12) });
   ok(r.ok, "list@rev ok: " + JSON.stringify(r).slice(0, 300));

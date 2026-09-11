@@ -1621,7 +1621,7 @@ interface PreviewPaneProps {
   relPath: string | null;
   /** The host's absolute workspace root (every listing carries it). The loopback-only "copy path" action builds the absolute path from it. */
   wsRoot?: string | null;
-  /** dsh's host.describe → canOpenPath probe (BUG-005): the deployment can reach a native desktop. */
+  /** dsh's native-open capability probe (BUG-005): the deployment can reach a native desktop. */
   openCapable?: boolean;
   status: VcsChange | null;
   base: string;
@@ -1656,16 +1656,37 @@ function absolutePathOf(root: string, relPath: string): string {
   return String(root).replace(/[/\\]+$/, "") + "/" + String(relPath);
 }
 
-// ---- dsh host API transport (BUG-005) ------------------------------------
+// ---- dsh host API transport (BUG-005, BUG-013) ----------------------------
 // "Open locally" reuses the MECHANISM dsh itself uses for the produced-files
-// links in the conversation: the dsh web app's own unary host methods
-// (host.describe / host.openPath), served by dsh with the deployment's
-// trusted-host fence. filestab registers nothing new — the client speaks the
-// same four-quadrant client-request envelope dsh's own client (dsh-client-
-// connection callUnary) POSTs to /api/<method>. The host side spawns the OS
-// default app (xdg-open hand-off); the canOpenPath probe says whether the
-// deployment can reach a desktop at all (a headless service environment
-// answers false → the action is simply not offered).
+// links in the conversation: the dsh web app's own unary host methods,
+// served with the deployment's trusted-host fence. filestab registers
+// nothing — the client speaks the four-quadrant client-request envelope
+// dsh's own client (dsh-client-connection callUnary) POSTs to
+// /api/<method>. The host side spawns the OS default app (xdg-open
+// hand-off); the capability probe says whether the deployment can reach a
+// desktop at all (a headless service environment answers false → the
+// action is simply not offered).
+//
+// The method names MOVED between dsh 0.1.1 and 0.1.2 (BUG-013):
+//   0.1.1  host.describe  (→ { canOpenPath })  /  host.openPath  (→ { opened })
+//          served by dsh-host-apiproxy's `host` domain
+//   0.1.2  session/canOpenWorkspacePath  (→ boolean)
+//          session/openWorkspacePath  (request { path } → { opened })
+//          served by the session controller's typert remotes, which the
+//          gateway validates with a wrapped payload: { args: { request: {…} } }
+//          (a no-parameter method sends { args: {} }).
+// The response envelope (server-response / ok-error result) is identical in
+// both. An UNKNOWN method answers HTTP 404 — the fallback signal: the probe
+// and the open try the 0.1.2 names first (the version this build is
+// verified against), and a 404 retries once on the 0.1.1 names. Only a 404
+// falls back; every other failure (transport, host error) propagates to the
+// caller, which degrades to hiding the action.
+class HostMethodAbsent extends Error {
+  constructor(method: string) {
+    super("host method absent: /api/" + method);
+    this.name = "HostMethodAbsent";
+  }
+}
 function hostEnvelope(method: string, payload: Record<string, unknown>, rpcId: string): string {
   return JSON.stringify({ type: "client-request", rpcId, method, payload });
 }
@@ -1694,17 +1715,35 @@ async function hostApi(method: string, payload: Record<string, unknown>, signal?
     body: hostEnvelope(method, payload, rpcId),
     signal,
   });
-  if (!res.ok) throw new Error("transport failure for /api/" + method + ": HTTP " + res.status);
+  if (!res.ok) {
+    if (res.status === 404) throw new HostMethodAbsent(method);
+    throw new Error("transport failure for /api/" + method + ": HTTP " + res.status);
+  }
   const parsed = parseHostResponse(await res.json(), rpcId);
   if (!parsed.ok) throw new RpcError(parsed.code, parsed.message ? parsed.code + ": " + parsed.message : parsed.code);
   return parsed.value;
 }
 // The deployment's native-open capability (one-shot per view mount).
-function hostDescribe(signal?: AbortSignal): Promise<{ canOpenPath?: boolean }> {
-  return hostApi("host.describe", {}, signal) as Promise<{ canOpenPath?: boolean }>;
+async function hostDescribe(signal?: AbortSignal): Promise<{ canOpenPath?: boolean }> {
+  try {
+    // dsh ≥ 0.1.2: the session controller's no-parameter probe.
+    const can = await hostApi("session/canOpenWorkspacePath", { args: {} }, signal);
+    return { canOpenPath: can === true };
+  } catch (e) {
+    if (!(e instanceof HostMethodAbsent)) throw e;
+    // dsh 0.1.1: the host domain's describe carries canOpenPath.
+    return (await hostApi("host.describe", {}, signal)) as { canOpenPath?: boolean };
+  }
 }
-function hostOpenPath(path: string, signal?: AbortSignal): Promise<{ opened: true }> {
-  return hostApi("host.openPath", { path }, signal) as Promise<{ opened: true }>;
+async function hostOpenPath(path: string, signal?: AbortSignal): Promise<{ opened: true }> {
+  try {
+    // dsh ≥ 0.1.2: the session controller's open (request { path }).
+    return (await hostApi("session/openWorkspacePath", { args: { request: { path } } }, signal)) as { opened: true };
+  } catch (e) {
+    if (!(e instanceof HostMethodAbsent)) throw e;
+    // dsh 0.1.1: the host domain's open.
+    return (await hostApi("host.openPath", { path }, signal)) as { opened: true };
+  }
 }
 // The full gate for offering "open locally" (BUG-005): a concrete file, a
 // known workspace root, the host's canOpenPath probe, AND a loopback origin
@@ -2446,10 +2485,11 @@ function FilesView(props: FilesViewProps) {
   // view latches: it stops the 5 s poll and shows a calm notice instead of the
   // raw code+UUID. Reload clears it to retry (a fresh session may have come up).
   const [sessionGone, setSessionGone] = React.useState(false);
-  // BUG-005: the host's native-open capability (dsh's own host.describe →
-  // canOpenPath), probed once per mount. Any failure → false, which simply
-  // hides the action (a headless service environment, or a profile without
-  // the dsh host API, is not an error state for the Files tab).
+  // BUG-005: the host's native-open capability (the version-tolerant probe
+  // below — host.describe on 0.1.1, session/canOpenWorkspacePath on 0.1.2),
+  // run once per mount. Any failure → false, which simply hides the action
+  // (a headless service environment, or a host without the API, is not an
+  // error state for the Files tab).
   const [openCapable, setOpenCapable] = React.useState(false);
   React.useEffect(() => {
     const c = new AbortController();
@@ -3032,4 +3072,4 @@ export { apply };
 // Test-only seam. The cordis loader ignores it (it reads apply/inject/name
 // only). This export exposes the pure preview helpers so
 // test/client.test.mjs can unit-test them.
-export const __test = { renderMarkdown, renderMarkdownWithImages, markdownImageSrcs, isLocalDocImageSrc, resolveDocImage, rewriteMarkdownImages, highlightSource, buildMermaidDoc, typeLabel, formatBytes, formatAge, fileRowMeta, loadState, saveState, segmentsForPath, parseDiff, displayRows, gapAfter, statusAggregate, jjRowLabel, rollupFor, rollupLabel, rollupSlot, DiffView, unifiedCells, unifiedPairs, intraLineDiff, intraTokens, realPathOf, renderKindOf, resolvePaneMode, paneToggleModes, previewContentFor, listNavTarget, unwrap, isSessionGone, rpcErrorText, isLoopbackOrigin, absolutePathOf, hostEnvelope, parseHostResponse, hostApi, canOfferOpenLocal, buildFileRef, mentionOf, lineStartsOf, lineOfOffset, REF_TEXT_MAX };
+export const __test = { renderMarkdown, renderMarkdownWithImages, markdownImageSrcs, isLocalDocImageSrc, resolveDocImage, rewriteMarkdownImages, highlightSource, buildMermaidDoc, typeLabel, formatBytes, formatAge, fileRowMeta, loadState, saveState, segmentsForPath, parseDiff, displayRows, gapAfter, statusAggregate, jjRowLabel, rollupFor, rollupLabel, rollupSlot, DiffView, unifiedCells, unifiedPairs, intraLineDiff, intraTokens, realPathOf, renderKindOf, resolvePaneMode, paneToggleModes, previewContentFor, listNavTarget, unwrap, isSessionGone, rpcErrorText, isLoopbackOrigin, absolutePathOf, hostEnvelope, parseHostResponse, hostApi, hostDescribe, hostOpenPath, HostMethodAbsent, canOfferOpenLocal, buildFileRef, mentionOf, lineStartsOf, lineOfOffset, REF_TEXT_MAX };

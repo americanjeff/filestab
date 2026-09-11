@@ -13,6 +13,7 @@
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Context } from "@deepseek-ai/cordis";
 import { listDirectory } from "./filesystem.js";
 import { resolveInWorkspace } from "./containment.js";
@@ -57,10 +58,71 @@ function apply(ctx: Context): void {
     const connection = ctx.get("connection");
     if (connection === undefined) return;
     try {
-      // The 3rd `options` arg is required (register() reads `options.authority`).
-      // The code omits `authority` to get the default trusted-host fence:
-      // loopback always trusted AND the deployment's --trusted-host.
-      connection.rpc.handle(BROWSE_CHANNEL, makeBrowseHandler(ctx), {});
+      // dsh 0.1.5-rc.2: `connection.rpc.handle()` is broken in web
+      // deployments — its route effect reads `webServer` off the connection
+      // plugin's plain context, where the service is inject-gated, so the
+      // registration throws and no route lands (custom channels answer 405).
+      // Register the channel route directly instead, mirroring the built-in
+      // /api route's fence and envelope: the same requestRejection 401/403
+      // gate, the same {type:'client-request'}/{type:'server-response'} JSON.
+      const webServer = (ctx.get("webServer") ?? (ctx as unknown as { webServer?: { register(route: unknown): unknown } }).webServer);
+      if (webServer === undefined) return;
+      // `requestRejection` reads instance state (`trustedHosts`, `browserAuth`),
+      // so it must run with the connection as `this` — calling it through an
+      // extracted method reference throws on the first request.
+      if (typeof connection.requestRejection !== "function") {
+        log("error", "filestab: connection.requestRejection missing — refusing to mount an unfenced route");
+        return;
+      }
+      const reject = (req: IncomingMessage) => connection.requestRejection(req);
+      const handler = makeBrowseHandler(ctx);
+      const REQUEST_CAP = 1024 * 1024; // browse requests carry ids and paths only; bytes travel in responses
+      webServer.register({
+        kind: "prefix",
+        path: BROWSE_CHANNEL,
+        handler: async (req: IncomingMessage, res: ServerResponse) => {
+          const rejection = reject(req);
+          if (rejection !== undefined) {
+            res.writeHead(rejection);
+            res.end(rejection === 401 ? "unauthorized" : "forbidden");
+            return;
+          }
+          const chunks: Buffer[] = [];
+          let received = 0;
+          for await (const chunk of req) {
+            received += (chunk as Buffer).byteLength;
+            if (received > REQUEST_CAP) {
+              res.writeHead(413, { connection: "close" });
+              res.end();
+              req.destroy();
+              return;
+            }
+            chunks.push(chunk as Buffer);
+          }
+          interface ClientRequestMessage { type?: unknown; rpcId?: unknown; method?: unknown; payload?: unknown }
+          let message: ClientRequestMessage | null = null;
+          try {
+            message = JSON.parse(Buffer.concat(chunks).toString("utf8") || "null") as ClientRequestMessage;
+          } catch {
+            message = null;
+          }
+          if (message === null || message.type !== "client-request"
+            || typeof message.rpcId !== "string" || typeof message.method !== "string") {
+            res.writeHead(400);
+            res.end("bad-request");
+            return;
+          }
+          let result: RpcResult;
+          try {
+            result = await handler(message.method, message.payload as BrowsePayload | null | undefined);
+          } catch (error) {
+            const e = error as { message?: string } | null;
+            result = { ok: false, error: { code: "internal", message: e?.message ?? String(error), details: {} } };
+          }
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ type: "server-response", rpcId: message.rpcId, result }));
+        },
+      });
       browseInstalled = true;
       log("info", `filestab: browse channel registered at ${BROWSE_CHANNEL}`);
     } catch (error) {
@@ -512,3 +574,6 @@ function makeBrowseHandler(ctx: Context): (endpoint: string, payload: BrowsePayl
 }
 
 export { apply, inject, name };
+// Test-only seam: the jj/git suites drive the browse handler directly instead
+// of standing up the route registration.
+export const __test = { makeBrowseHandler };

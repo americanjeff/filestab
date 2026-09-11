@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.1.4] - 2026-09-11
+
+- Works with dsh 0.1.5: the Files tab (main area, sibling of the Chat and Trajectory tabs) works again — dsh 0.1.5's broken custom RPC channel registration had left the view empty.
+
 ## [0.1.3] - 2026-09-05
 
 - Files view: the collapsed file list now shows a pane-edge rail instead of a small header icon.

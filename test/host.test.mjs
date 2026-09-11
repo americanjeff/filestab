@@ -45,10 +45,14 @@ const fakePersistence = {
     throw new Error(`no such session: ${id}`);
   },
 };
-let capturedHandler = null, capturedChannel = null, capturedOptions = null;
+let capturedRoute = null;
 const ctx = {
   get(name) {
-    if (name === "connection") return { rpc: { handle: (channel, handler, options) => { capturedChannel = channel; capturedHandler = handler; capturedOptions = options; } } };
+    // `this`-dependent on purpose: production must call requestRejection as a
+    // method of the connection object. An extracted method reference loses
+    // `this` and throws on the real service's `this.trustedHosts`.
+    if (name === "connection") return { fence: undefined, requestRejection() { return this.fence; } };
+    if (name === "webServer") return { register: (route) => { capturedRoute = route; } };
     if (name === "sessions") return { get: (id) => (id === SESSION_ID ? { id, header: { cwd: ws } } : undefined) };
     if (name === "sandboxPolicy") return { resolve: ({ session }) => ({ mode: "workspace-write", workspaceRoot: session?.header?.cwd }) };
     if (name === "sessionPersistence") return fakePersistence;
@@ -60,14 +64,59 @@ const ctx = {
 };
 
 apply(ctx);
-assert.strictEqual(capturedChannel, "/filez-browse", "browse channel registered: " + capturedChannel);
-assert.ok(typeof capturedHandler === "function", "browse handler captured");
-// Regression guard: register() reads `options.authority`, so the 3rd arg must
-// be a real object, a missing one throws and silently drops the route.
-assert.ok(capturedOptions !== null && typeof capturedOptions === "object", "options object passed to rpc.handle (missing => 405): " + JSON.stringify(capturedOptions));
+assert.strictEqual(capturedRoute?.kind, "prefix", "route kind prefix: " + JSON.stringify(capturedRoute?.kind));
+assert.strictEqual(capturedRoute?.path, "/filez-browse", "browse route registered: " + capturedRoute?.path);
+assert.ok(typeof capturedRoute?.handler === "function", "route handler captured");
 
+// The route speaks the connection envelope over node:http. Drive it with
+// fake req/res: the body is the client-request JSON, the response the
+// server-response JSON.
+const fakeReq = (chunks, { destroyCalls = { n: 0 } } = {}) => ({
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  destroy() { destroyCalls.n++; },
+  [Symbol.asyncIterator]: async function* () { for (const c of chunks) yield c; },
+});
+const fakeRes = () => {
+  const res = { status: null, headers: null, body: "" };
+  res.writeHead = (status, headers) => { res.status = status; res.headers = headers ?? {}; };
+  res.end = (body) => { res.body = body ?? ""; };
+  return res;
+};
 let n = 0;
-const call = (endpoint, payload) => capturedHandler(endpoint, payload);
+const call = async (endpoint, payload, rpcId = "rpc-" + Math.random().toString(16).slice(2)) => {
+  const res = fakeRes();
+  await capturedRoute.handler(
+    fakeReq([Buffer.from(JSON.stringify({ type: "client-request", rpcId, method: endpoint, payload }))]),
+    res,
+  );
+  assert.strictEqual(res.status, 200, `${endpoint}: 200 (got ${res.status} ${res.body.slice(0, 120)})`);
+  const env = JSON.parse(res.body);
+  assert.strictEqual(env.type, "server-response", "envelope type");
+  assert.strictEqual(env.rpcId, rpcId, "rpcId round-trips");
+  return env.result;
+};
+// The trust fence runs before dispatch: a 401 rejection never reaches the handler.
+{ let route2 = null;
+  const unfenced = { ...ctx, get(name) {
+    if (name === "connection") return { fence: 401, requestRejection() { return this.fence; } };
+    if (name === "webServer") return { register: (r) => { route2 = r; } };
+    return ctx.get(name);
+  } };
+  apply(unfenced);
+  const res = fakeRes();
+  await route2.handler(fakeReq([Buffer.from(JSON.stringify({ type: "client-request", rpcId: "r", method: "list", payload: { sessionId: SESSION_ID, relPath: "" } }))]), res);
+  assert.strictEqual(res.status, 401, "fence: 401 rejection"); n++; }
+// A malformed body is a 400, not a crash.
+{ const res = fakeRes();
+  await capturedRoute.handler(fakeReq([Buffer.from("{not json")]), res);
+  assert.strictEqual(res.status, 400, "malformed body → 400: " + res.status); n++; }
+// An over-cap body is a 413 and the socket is destroyed.
+{ const dc = { n: 0 };
+  const res = fakeRes();
+  await capturedRoute.handler(fakeReq([Buffer.alloc(1024 * 1024 + 1)], { destroyCalls: dc }), res);
+  assert.strictEqual(res.status, 413, "over-cap body → 413: " + res.status);
+  assert.ok(dc.n >= 1, "over-cap body destroys the socket"); n++; }
 
 { const r = await call("list", { sessionId: SESSION_ID, relPath: "" });
   assert.ok(r.ok, "list root ok: " + JSON.stringify(r));
@@ -226,8 +275,8 @@ const call = (endpoint, payload) => capturedHandler(endpoint, payload);
 // session id keeps the original hard failure (no crash, no cold path).
 { const ctx2 = { ...ctx, get(name) { if (name === "sessionPersistence") return undefined; return ctx.get(name); } };
   apply(ctx2);
-  assert.ok(typeof capturedHandler === "function", "second apply re-registered the handler");
-  const r = await capturedHandler("list", { sessionId: "nope", relPath: "" });
+  assert.ok(typeof capturedRoute?.handler === "function", "second apply re-registered the route");
+  const r = await call("list", { sessionId: "nope", relPath: "" });
   assert.ok(!r.ok && r.error.code === "session-not-found", "no persistence service → session-not-found: " + JSON.stringify(r)); n++; }
 
 await rm(base, { recursive: true, force: true });
