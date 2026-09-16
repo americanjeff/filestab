@@ -8,16 +8,30 @@
 // The dsh GUI and the filestab UI both follow the browser locale, so the ZH
 // pass captures the same scenes in the Chinese UI.
 //
+// dsh 0.1.5: the Files surface is the RIGHT COLUMN (the conversation Files
+// tab is gone). A session only gets its right sidebar once a turn exists, so
+// each pass sends one "hello" (one real model call) and then opens the column
+// via button[data-sidebar-right-expand]; the column's sole guide entry seeds
+// the files page (.dswFiles_root) directly. Tree rows are button.dswFiles_row
+// with a .dswFiles_name (folders carry aria-expanded); there is no crumb bar.
+//
 // Captures per pass (dark theme via colorScheme):
 //   rollups-dark.png      worktree listing (rollups + M/A badges) with the
-//                         side-by-side diff of a changed file
+//                         unified diff of a changed file (narrow pane)
 //   history-dropdown.png  commit selected in the dropdown, snapshot tree,
 //                         binary diff card
-//   preview-markdown.png  rendered markdown: task lists, table, highlighted
-//                         fence, mermaid in a sealed frame
+//   preview-markdown.png  rendered markdown: task lists, highlighted fence,
+//                         mermaid in a sealed frame
 //   preview-source.png    syntax-highlighted source
-//   preview-image.png     image rendered inline
-//   preview-html.png      HTML rendered in the sealed iframe
+//   external-section.png  the External band: a file OUTSIDE the workspace,
+//                         pinned by absolute path, selected and previewing
+//   diff-side-by-side.png the README.md diff in split mode, LAST — the
+//                         column in dsh fullscreen at an 1800px viewport
+//                         (the fixed 630px column is below the 66%-per-side
+//                         split cutoff of the 100-column reference). A
+//                         fullscreen round-trip leaves the host's
+//                         Fullscreen button overlaid on the column's first
+//                         row, so the other shots must precede it.
 //
 // Full-page backups land in test/e2e/out/shots/<pass>/ for review.
 //
@@ -38,6 +52,7 @@ import { chromium } from "playwright-core";
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DSH_BIN = process.env.E2E_DSH || "dsh";
 const OUT_DIR = join(REPO_ROOT, "test", "e2e", "out", "shots");
+const escapeRegExp = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
 
@@ -69,7 +84,7 @@ function makeFixture(root) {
   execFileSync("jj", ["git", "init"], { cwd: fx, stdio: "ignore" });
   jj("describe", "-m", "initial import");
 
-  // The demo image: a 480x300 gradient card (also the inline-image capture).
+  // The demo image: a 480x300 gradient card (the binary-diff card in history).
   const logo = join(fx, "img", "logo.png");
   mkdirSync(dirname(logo), { recursive: true });
   execFileSync("magick", [
@@ -225,8 +240,15 @@ function bootDsh(home) {
     child.stdout.on("data", (d) => {
       log.push(d.toString());
       process.stdout.write(d.toString());
-      const m = d.toString().match(/dsh web: http:\/\/127\.0\.0\.1:(\d+)/);
-      if (m && !settled) { settled = true; clearTimeout(timer); res({ port: Number(m[1]), stop }); }
+      // 0.1.5 prints the browser URL with a one-time-auth token; the token
+      // exchanges for a persistent signed cookie on first load, and a fresh
+      // context (no cookie) re-uses the same token, so keep the FULL url.
+      const m = d.toString().match(/dsh web: (http:\/\/127\.0\.0\.1:\d+\S+)/);
+      if (m && !settled) {
+        settled = true;
+        clearTimeout(timer);
+        res({ port: Number(m[1].match(/:(\d+)/)[1]), url: m[1], stop });
+      }
     });
     child.stderr.on("data", (d) => { log.push(d.toString()); process.stderr.write(d.toString()); });
     child.on("error", (e) => {
@@ -252,10 +274,14 @@ function findChrome() {
 
 // dsh's own UI labels per locale (the filestab UI localizes on its own).
 const LABELS = {
-  en: { locale: "en-US", addWs: "Add workspace", open: "Open", send: "Send message", filesTab: "Files" },
-  zh: { locale: "zh-CN", addWs: "添加工作区", open: "打开", send: "发送消息", filesTab: "文件" },
+  en: { locale: "en-US", addWs: "Add workspace", open: "Open", send: "Send message", openFile: "Open file…" },
+  zh: { locale: "zh-CN", addWs: "添加工作区", open: "打开", send: "发送消息", openFile: "打开文件…" },
 };
 
+// Open a session AND reveal the filestab (the right column). A fresh session
+// has no turns, so the right sidebar (and its expand button) does not exist
+// yet: send one "hello" (the single real model call per pass), wait for the
+// expand button, open the column, and wait for the seeded files page.
 async function openSession(browser, { url, workspace, lang, viewport = { width: 1400, height: 900 }, scale = 1 }) {
   const L = LABELS[lang];
   const context = await browser.newContext({ viewport, colorScheme: "dark", locale: L.locale, deviceScaleFactor: scale });
@@ -264,7 +290,7 @@ async function openSession(browser, { url, workspace, lang, viewport = { width: 
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
     await page.waitForTimeout(3000);
-    // "Add workspace" is present on both the initial landing and post-session heroes.
+    // "Add workspace" is present on the initial landing.
     await page.getByRole("button", { name: L.addWs }).click({ timeout: 15_000 });
     const dialog = page.locator('[class*="_dialog_"]').first();
     await dialog.waitFor({ state: "visible", timeout: 10_000 });
@@ -277,18 +303,24 @@ async function openSession(browser, { url, workspace, lang, viewport = { width: 
     await input.press("Enter");
     await page.waitForTimeout(1200);
     await page.getByRole("button", { name: L.open, exact: true }).click();
-    await page.waitForTimeout(3000);
-    // A session only gets its conversation pane (with the view tabs) once a
-    // turn exists; send one. This is the one real model call per workspace.
-    const ta = page.locator("textarea").first();
-    await ta.waitFor({ state: "visible", timeout: 15_000 });
-    await ta.click();
-    await ta.type("hello");
+    // The composer is a Lexical contenteditable (.uV2eYG_input); it mounts a
+    // beat after the session opens, so wait, focus, then type with the
+    // keyboard (real key events the editor registers). The one turn that
+    // unlocks the right sidebar.
+    await page.waitForTimeout(2500);
+    const composer = page.locator(".uV2eYG_input").last();
+    await composer.waitFor({ state: "visible", timeout: 15_000 });
+    await composer.click();
+    await page.waitForTimeout(200);
+    await page.keyboard.type("hello");
+    await page.waitForTimeout(300);
     await page.getByRole("button", { name: L.send }).click();
-    await page.waitForFunction((tab) => {
-      const tl = document.querySelector('[role="tablist"]');
-      return !!tl && [...tl.querySelectorAll('[role="tab"]')].some((t) => t.textContent.includes(tab));
-    }, L.filesTab, { timeout: 90_000 });
+    // The expand button appears only once a turn exists.
+    const expand = page.locator("button[data-sidebar-right-expand]");
+    await expand.waitFor({ state: "visible", timeout: 120_000 });
+    // Open the right column; its sole guide entry seeds the files page.
+    await expand.click();
+    await page.locator(".dswFiles_root").waitFor({ state: "visible", timeout: 20_000 });
   } catch (e) {
     await context.close().catch(() => {});
     throw new Error(`openSession(${workspace}, ${lang}): ${e.message}`);
@@ -298,11 +330,13 @@ async function openSession(browser, { url, workspace, lang, viewport = { width: 
 
 function ui(page) {
   const root = () => page.locator(".dswFiles_root");
-  const rowNames = () => page.locator(".dswFiles_rowName").allTextContents();
-  const row = (name) => page.locator(".dswFiles_row", {
-    has: page.locator(".dswFiles_rowName", { hasText: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) }),
-  });
-  const crumb = (i = 0) => root().locator(".dswFiles_crumb").nth(i);
+  // Tree rows only (the External band's rows live in .dswFiles_extList,
+  // outside .dswFiles_tree, so this excludes them).
+  const tree = () => root().locator(".dswFiles_tree");
+  const rowNames = () => tree().locator(".dswFiles_name").allTextContents();
+  const row = (name) => tree().locator("button.dswFiles_row", {
+    has: page.locator(".dswFiles_name", { hasText: new RegExp(`^${escapeRegExp(name)}$`) }),
+  }).first();
   const until = async (fn, what, ms = 20_000) => {
     const t0 = Date.now();
     for (;;) {
@@ -311,78 +345,90 @@ function ui(page) {
       await page.waitForTimeout(250);
     }
   };
-  return { page, root, rowNames, row, crumb, until };
+  return { page, root, tree, rowNames, row, until };
 }
 
 // ── capture ──────────────────────────────────────────────────────────────────
 
-function clickFilesTab(page, tabLabel) {
-  return page.locator('[role="tab"]', { hasText: tabLabel }).click();
-}
-
-async function shot(u, name, outDir, pass) {
+async function shot(u, name, outDir, pass, opts = {}) {
   const el = join(outDir, name);
   mkdirSync(outDir, { recursive: true });
   mkdirSync(join(OUT_DIR, pass), { recursive: true });
   await u.page.waitForTimeout(400); // let fonts/renders settle
-  await u.root().screenshot({ path: el });
+  // cropBottom: end the shot just below the content (the diff grid's full
+  // scroll height, or the tree's — whichever reaches lower) instead of
+  // capturing the whole column with its empty tail. clip is honored on
+  // PAGE screenshots only (element screenshots ignore it), so the crop
+  // branch captures the page region of the column instead.
+  if (opts.cropBottom) {
+    const rootBox = await u.root().boundingBox();
+    // Both containers are flex children stretched to the pane, so their own
+    // boxes reach the pane bottom — the content bottom is the last ROW's
+    // (the grid's last cell, the tree's last row).
+    const bottoms = await u.page.evaluate(() => {
+      const out = [];
+      for (const sel of [".dswFiles_diffGrid", ".dswFiles_tree"]) {
+        const n = document.querySelector(sel);
+        const last = n && n.lastElementChild;
+        if (last) out.push(last.getBoundingClientRect().bottom);
+      }
+      return out;
+    });
+    const contentBottom = Math.max(0, ...bottoms);
+    const h = Math.max(120, Math.min(contentBottom - rootBox.y + 16, rootBox.height));
+    await u.page.screenshot({ path: el, clip: { x: rootBox.x, y: rootBox.y, width: rootBox.width, height: h } });
+  } else {
+    await u.root().screenshot({ path: el });
+  }
   await u.page.screenshot({ path: join(OUT_DIR, pass, name + ".full.png"), fullPage: true });
   console.log(`capture (${pass}): ${name}`);
 }
 
-// Return to the workspace root (the root crumb is disabled while we ARE at
-// the root, so only click when a folder crumb exists).
-async function toRoot(u, marker) {
-  if (await u.root().locator(".dswFiles_crumb").count() > 1) {
-    await u.crumb(0).click();
+// Navigate to a file by path (list of segments) and select it. Idempotent
+// about folder expansion (a rev switch may or may not reset the tree): a
+// folder segment is clicked only to expand it, an already-expanded one is
+// left alone, and the final segment (the file) is clicked to select it.
+async function openFile(u, segments) {
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const isLast = i === segments.length - 1;
+    await u.until(async () => (await u.rowNames()).includes(seg), `row "${seg}" visible`);
+    const r = u.row(seg);
+    if (isLast) {
+      await r.click(); // the file: select it
+    } else {
+      const expanded = await r.getAttribute("aria-expanded");
+      if (expanded !== "true") {
+        await r.click(); // a folder: expand it
+        await u.page.waitForTimeout(300);
+      }
+    }
   }
-  await u.until(async () => (await u.rowNames()).includes(marker), `back at root (${marker})`);
 }
 
-// Navigate to a file by path (list of segments) and select it.
-async function openFile(u, segments, marker) {
-  await toRoot(u, marker);
-  for (const seg of segments) {
-    await u.row(seg).click();
-    await u.page.waitForTimeout(300);
-  }
-}
-
-async function captureAll(browser, url, fx, { lang, outDir, pass }) {
+async function captureAll(browser, url, fx, outside, { lang, outDir, pass }) {
   const L = LABELS[lang];
   const { context, page } = await openSession(browser, { url, workspace: fx, lang });
   const u = ui(page);
-  await clickFilesTab(page, L.filesTab);
-  await u.root().waitFor({ state: "visible", timeout: 15_000 });
   const sel = u.root().locator(".dswFiles_statusSelect");
   await u.until(async () => (await sel.count()) > 0, "jj status line");
 
-  // 0. hero (zh pass only): the whole GUI with the Files tab open, for the
-  //    zh README's hero image. The EN README keeps its existing hero.png.
-  if (pass === "zh") {
-    await u.page.waitForTimeout(400);
-    await u.page.screenshot({ path: join(outDir, "hero.png"), fullPage: true });
-    console.log(`capture (${pass}): hero.png (full GUI)`);
-  }
-
-  // 1. rollups: root listing with badges/rollups + diff of README.md (M).
+  // 1. rollups: root listing with badges/rollups + the side-by-side diff of
+  //    README.md (M).
   await u.row("README.md").click();
-  await u.until(async () => (await u.root().locator(".dswFiles_diffHead").count()) > 0, "diff head rendered");
+  // The diff grid is the render signal: the sticky head (dswFiles_diffHead)
+  // now carries only the diff meta and is absent for a plain modification,
+  // while the file's name lives in the pane header (dswFiles_paneHead).
+  await u.until(async () => (await u.root().locator(".dswFiles_diffGrid").count()) > 0, "diff rendered");
   await u.page.waitForTimeout(600);
-  await shot(u, "rollups-dark.png", outDir, pass);
+  // Crop the empty column tail: the figure is the listing + the diff, and
+  // the rest of the column is dead space. In the narrow column (320px pane)
+  // the diff is UNIFIED — the 320px pane can't fit 66 of the 100 reference
+  // columns per split side.
+  await shot(u, "rollups-dark.png", outDir, pass, { cropBottom: true });
 
-  // 1b. collapse-nav: the header toggle hides the file list, giving the diff
-  //     the full width of the tab. Re-expand before the next shot (it needs
-  //     the tree listing).
-  const collapseBtn = u.root().locator(".dswFiles_collapseBtn");
-  await collapseBtn.click();
-  await u.until(async () => (await u.root().locator(".dswFiles_browsePane").count()) === 0, "left pane collapsed");
-  await shot(u, "collapse-nav.png", outDir, pass);
-  await collapseBtn.click();
-  await u.until(async () => (await u.root().locator(".dswFiles_browsePane").count()) === 1, "left pane expanded");
-
-  // 2. history-dropdown: pick "initial import" (tree = README.md + img/,
-  //    binary card on logo.png), capture the snapshot view.
+  // 2. history-dropdown: pick "initial import" (tree = README.md + img/),
+  //    open img/logo.png (the binary diff card).
   const opts = await sel.evaluate((s) => Array.from(s.options).map((o) => [o.value, o.textContent]));
   console.log(`dropdown options (${pass}):\n` + opts.map(([v, t]) => `  ${v}  ${t}`).join("\n"));
   const initOpt = opts.find(([, t]) => (t || "").includes("initial import"));
@@ -390,9 +436,7 @@ async function captureAll(browser, url, fx, { lang, outDir, pass }) {
   await sel.selectOption(initOpt[0]);
   await u.until(async () => (await u.rowNames()).includes("img"), "snapshot tree listed");
   await u.until(async () => !(await u.rowNames()).includes("site"), "site/ gone in this commit");
-  await u.row("img").click();
-  await u.page.waitForTimeout(300);
-  await u.row("logo.png").click();
+  await openFile(u, ["img", "logo.png"]);
   await u.until(async () =>
     (await u.root().locator(".dswFiles_diffBinaryRow").count()) > 0 ||
     ((await u.root().locator(".dswFiles_previewPane").innerText().catch(() => "")) ?? "").toLowerCase().includes("binary"),
@@ -400,15 +444,12 @@ async function captureAll(browser, url, fx, { lang, outDir, pass }) {
   await u.page.waitForTimeout(600);
   await shot(u, "history-dropdown.png", outDir, pass);
 
-  // Back to the worktree for the preview shots. Select the worktree FIRST:
-  // the snapshot tree has no scratch.txt, so the root wait only succeeds
-  // after the live tree is restored (the path may be retained or reset by
-  // the rev switch; toRoot handles both).
+  // Back to the worktree for the preview shots.
   await sel.selectOption("worktree");
-  await toRoot(u, "scratch.txt");
+  await u.until(async () => (await u.rowNames()).includes("scratch.txt"), "worktree tree restored");
 
   // 3. preview-markdown: docs/notes.md renders by default (clean markdown).
-  await openFile(u, ["docs", "notes.md"], "scratch.txt");
+  await openFile(u, ["docs", "notes.md"]);
   const md = u.root().locator(".dswFiles_previewMarkdown");
   await u.until(async () => (await md.count()) > 0 && (await md.locator("h1").count()) > 0, "markdown rendered");
   await u.until(async () => {
@@ -421,32 +462,75 @@ async function captureAll(browser, url, fx, { lang, outDir, pass }) {
   await shot(u, "preview-markdown.png", outDir, pass);
 
   // 4. preview-source: app/util.py, highlighted (view mode default).
-  await openFile(u, ["app", "util.py"], "scratch.txt");
+  await openFile(u, ["app", "util.py"]);
   const pre = u.root().locator(".dswFiles_previewText");
   await u.until(async () => (await pre.count()) > 0 && (await pre.locator(".hljs-keyword").count()) > 0, "highlighted source");
   await u.page.waitForTimeout(300);
   await shot(u, "preview-source.png", outDir, pass);
 
-  // 5. preview-image: img/logo.png inline.
-  await openFile(u, ["img", "logo.png"], "scratch.txt");
-  const img = u.root().locator(".dswFiles_previewImage");
-  await u.until(async () => (await img.count()) > 0, "inline image");
-  await img.first().waitFor({ state: "visible" });
-  await u.page.waitForTimeout(300);
-  await shot(u, "preview-image.png", outDir, pass);
-
-  // 6. preview-html: site/index.html, raw by default, then Preview (sealed).
-  await openFile(u, ["site", "index.html"], "scratch.txt");
-  await u.until(async () => ((await u.root().locator(".dswFiles_previewText").innerText().catch(() => "")) ?? "").includes("<!doctype"), "raw html default");
-  await u.root().locator(".dswFiles_paneToggleBtn", { hasText: lang === "zh" ? /^预览$/ : /^Preview$/ }).first().click();
-  const iframe = u.root().locator(".dswFiles_previewHtml");
-  await iframe.waitFor({ state: "visible", timeout: 15_000 });
-  await u.until(async () => {
-    const f = await (await iframe.elementHandle()).contentFrame();
-    return f ? f.evaluate("document.querySelector('.card') !== null").catch(() => false) : false;
-  }, "sealed page rendered in the frame");
+  // 5. external-section: pin a file OUTSIDE the workspace by absolute path
+  //    (the footer's "Open file…"); it lands in the External band, is
+  //    selected, and previews in the same pane.
+  await page.getByRole("button", { name: L.openFile }).click();
+  const extInput = u.root().locator(".dswFiles_extInput");
+  await extInput.waitFor({ state: "visible", timeout: 10_000 });
+  await extInput.fill(outside);
+  await extInput.press("Enter");
+  await u.until(async () => (await u.root().locator(".dswFiles_extList button.dswFiles_row").count()) > 0, "external row pinned");
+  await u.until(async () => (await u.root().locator(".dswFiles_previewMarkdown").count()) > 0, "external markdown preview");
   await u.page.waitForTimeout(600);
-  await shot(u, "preview-html.png", outDir, pass);
+  await shot(u, "external-section.png", outDir, pass);
+
+  // 6. diff-side-by-side: the README.md diff (M) in split mode — taken LAST.
+  //    The fixed 630px column is BELOW the split cutoff (a split side must
+  //    fit 66% of the 100 reference columns — pane ≈1078px), so the column
+  //    goes to dsh FULLSCREEN for this shot. The 1400px viewport's
+  //    fullscreen pane (≈1022px) is just under that cutoff too, so the
+  //    viewport is widened to 1800 for the shot and restored after (the
+  //    column stays a fixed 630px — probed — so only this shot is
+  //    affected). The chrome button's aria-label is localized, but its
+  //    data attribute is not (probed: data-sidebar-right-mode).
+    //    LAST because of the 1800px viewport dance (a later narrower shot
+  //    would capture the reflow) and because the exit click parks
+  //    headless's virtual mouse on the host's fullscreen button — a
+  //    hover-expanded affordance (small icon -> "Fullscreen" label pill)
+  //    that stays hover-stuck without a real pointer, leaving the pill
+  //    over the nav header's path-edit/reload/hide controls in every
+  //    later shot. Manual usage is unaffected (user-confirmed); the
+  //    mouse.move after the exit loop resets the hover state anyway.
+  // The external pin left the pane on outside-notes.md (preview mode);
+  // re-select README.md so the diff grid renders again for the split shot.
+  await u.row("README.md").click();
+  await u.until(async () => (await u.root().locator(".dswFiles_diffGrid").count()) > 0, "diff rendered");
+  await u.page.setViewportSize({ width: 1800, height: 900 });
+  const fsBtn = u.page.locator('button[data-sidebar-right-mode="fullscreen"]');
+  await fsBtn.first().click();
+  await u.until(async () => {
+    const cls = (await u.root().locator(".dswFiles_diffGrid").getAttribute("class")) || "";
+    return !cls.includes("dswFiles_diffGridU");
+  }, "split layout rendered");
+  await u.page.waitForTimeout(600);
+  await shot(u, "diff-side-by-side.png", outDir, pass, { cropBottom: true });
+  // Exit fullscreen: the data attribute again if it persists on the exit
+  // button, else the localized aria-labels (en probed; zh guessed).
+  let restored = false;
+  for (const s of ['button[data-sidebar-right-mode="fullscreen"]',
+    'button[aria-label="Exit fullscreen"]', 'button[aria-label="退出全屏"]']) {
+    const b = u.page.locator(s);
+    if (!(await b.count())) continue;
+    await b.first().click();
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      const bb = await u.root().boundingBox();
+      if (bb && bb.width < 800) { restored = true; break; }
+      await u.page.waitForTimeout(150);
+    }
+    if (restored) break;
+  }
+  if (!restored) throw new Error("could not exit dsh fullscreen for the side-by-side shot");
+  // Unpark the virtual mouse from the fullscreen button (see the LAST note).
+  await u.page.mouse.move(5, 400);
+  await u.page.setViewportSize({ width: 1400, height: 900 });
 
   await context.close();
 }
@@ -458,14 +542,23 @@ async function main() {
   try {
     const home = makeScratchHome(root);
     const fx = makeFixture(root);
+    // The External-section fixture: a markdown file OUTSIDE the jj workspace;
+    // the host reads it by absolute path through fileshow-abs.
+    const outside = join(root, "outside-notes.md");
+    writeFileSync(outside,
+      "# Outside the workspace\n\n" +
+      "This file lives outside the session's workspace,\n" +
+      "pinned into the External section by absolute path:\n\n" +
+      "- reconstructed from a dropped leading slash\n" +
+      "- read through the `fileshow-abs` endpoint\n");
     console.log(`fixture: ${fx}`);
     dsh = await bootDsh(home);
-    const url = `http://127.0.0.1:${dsh.port}`;
+    const url = dsh.url;
     console.log(`dsh web on ${url}`);
     browser = await chromium.launch({ executablePath: findChrome(), headless: true, args: ["--no-sandbox"] });
 
-    await captureAll(browser, url, fx, { lang: "en", outDir: join(REPO_ROOT, "assets"), pass: "en" });
-    await captureAll(browser, url, fx, { lang: "zh", outDir: join(REPO_ROOT, "assets", "zh"), pass: "zh" });
+    await captureAll(browser, url, fx, outside, { lang: "en", outDir: join(REPO_ROOT, "assets"), pass: "en" });
+    await captureAll(browser, url, fx, outside, { lang: "zh", outDir: join(REPO_ROOT, "assets", "zh"), pass: "zh" });
   } catch (e) {
     const pages = browser ? [...browser.contexts().flatMap((c) => c.pages())] : [];
     for (const p of pages) {
@@ -486,5 +579,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   main();
 }
 
-// Reused by scripts/hero-experiments.mjs for README hero candidates.
-export { makeFixture, makeScratchHome, bootDsh, findChrome, openSession, ui, clickFilesTab, openFile, toRoot };
+// Reused by the hero-experiment scripts for fixture/boot/launch. `clickFilesTab`
+// is a deprecated no-op: 0.1.5 has no conversation Files tab — openSession
+// reveals the right column directly.
+async function clickFilesTab() { return; }
+export { makeFixture, makeScratchHome, bootDsh, findChrome, openSession, ui, openFile, clickFilesTab };

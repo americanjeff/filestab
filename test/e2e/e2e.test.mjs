@@ -1,7 +1,10 @@
 // test/e2e/e2e.test.mjs, end-to-end journeys against a sandboxed dsh instance
 // driven by a real headless browser (playwright-core + a playwright chromium).
 //
-// Scope: the Files tab journeys J1, J1.2, J2, J3, J4, J5, J6, J18 (each defined by its section header below).
+// Scope: the Files view journeys J1, J1.2, J3, J4, J5, J6, J19 (each defined
+// by its section header below). On 0.1.5 the Files view is the dsh RIGHT PANE
+// (filestab serves the files slot; the conversation area has no Files tab), so
+// openSession opens that pane via the host's own expand button.
 // The workspace picker and the send-a-message session flow are dsh's own UI;
 // here they are automation helpers, not code under test.
 //
@@ -78,9 +81,8 @@ function makeScratchHome(root) {
 
 function makeFixtures(root) {
   const fx = { root: join(root, "fixtures") };
-  // F-JJ: one described commit ("base") + a dirty worktree with 7 visible
-  // entries, incl. a symlink that points OUTSIDE the workspace (J18) and a
-  // 2 MB random file over FILE_SHOW_CAP (J3).
+  // F-JJ: one described commit ("base") + a dirty worktree with 6 visible
+  // entries, incl. a 2 MB random file over FILE_SHOW_CAP (J3).
   fx.fj = join(fx.root, "fj");
   mkdirSync(join(fx.fj, "sub"), { recursive: true });
   execFileSync("jj", ["git", "init"], { cwd: fx.fj });
@@ -91,10 +93,6 @@ function makeFixtures(root) {
   writeFileSync(join(fx.fj, "page.html"), "<!doctype html><title>t</title><p>hi</p>");
   writeFileSync(join(fx.fj, "pic.png"), PNG_1X1);
   writeFileSync(join(fx.fj, "big.bin"), randomBytes(2_000_000));
-  symlinkSync("/etc/passwd", join(fx.fj, "sneaky"));
-  // The escape target lives OUTSIDE the workspace (J18).
-  fx.outside = join(fx.root, "outside.txt");
-  writeFileSync(fx.outside, "secret\n");
   // F-PLAIN: no VCS at all (J1.2, J4, J5). Without VCS nothing is diffable,
   // so pane defaults resolve to the non-diff branches (markdown -> preview,
   // html -> raw view) exactly as the journeys describe.
@@ -219,40 +217,60 @@ async function openSession(browser, { url, workspace }) {
     // A session only gets its conversation pane (with the view tabs) once a
     // turn exists; send one. This is the one real model call per workspace.
     // 0.1.5: the composer is a contenteditable div (not a textarea) and the
-    // conversation view tabs (Chat / Trajectory / Files / …) mount after the
-    // first turn.
+    // conversation view tabs (Chat / Trajectory) mount after the first turn.
     const ta = page.locator(".uV2eYG_input").last();
     await ta.waitFor({ state: "visible", timeout: 15_000 });
     await ta.click();
     await ta.pressSequentially("hello");
     await page.getByRole("button", { name: "Send message" }).click();
-    await page.waitForFunction(() => {
-      const tl = document.querySelector('[role="tablist"]');
-      return !!tl && [...tl.querySelectorAll('[role="tab"]')].some((t) => t.textContent.includes("Files"));
-    }, { timeout: 120_000 });
+    // 0.1.5: the Files surface is the dsh RIGHT PANE, not a conversation tab
+    // (the conversation area no longer registers a Files tab). The first turn
+    // builds the conversation pane; the right pane is collapsed and is opened
+    // by the host's own expand button in the conversation header corner.
+    // filestab serves the files slot, so opening the pane lands on the Files
+    // view directly. Poll (evaluate, not waitForFunction) to dodge the
+    // arg/options positional trap.
+    console.log(`openSession(${workspace.split("/").pop()}): hello sent, waiting for the conversation + right-pane expand button`);
+    const t0 = Date.now();
+    for (;;) {
+      const ready = await page.evaluate(() => {
+        const exp = document.querySelector('[data-sidebar-right-expand]');
+        const conv = document.querySelector('[role="tablist"]');
+        return !!conv && !!exp; // conversation built + pane collapsed
+      }).catch(() => false);
+      if (ready) break;
+      if (Date.now() - t0 > 180_000) throw new Error("timeout waiting for the conversation + right-pane expand button");
+      await page.waitForTimeout(500);
+    }
+    await page.locator('[data-sidebar-right-expand]').click();
   } catch (e) {
+    // Capture the page state before closing the context, so a failure here
+    // (driving dsh's own UI) is diagnosable after the scratch tree is gone.
+    try {
+      mkdirSync(OUT_DIR, { recursive: true });
+      await page.screenshot({ path: join(OUT_DIR, `openSession-failure-${workspace.split("/").pop()}.png`) });
+    } catch { /* the screenshot is best-effort */ }
     await context.close().catch(() => {});
     throw new Error(`openSession(${workspace}): ${e.message}`);
   }
   return session;
 }
 
+// 0.1.5: there is no conversation Files tab — openSession opened the right
+// pane (filestab serves the files slot), so the Files view is already the
+// pane's content. Just wait for it to be visible.
 async function clickFilesTab(page) {
-  await page.locator('[role="tab"]', { hasText: "Files" }).click();
-  await page.locator(".dswFiles_root").waitFor({ state: "visible", timeout: 15_000 });
+  await page.locator(".dswFiles_root").waitFor({ state: "visible", timeout: 20_000 });
 }
 
 // The Files view's stable, ours-namespace selectors.
 function ui(page) {
   const root = () => page.locator(".dswFiles_root");
-  const rowNames = () => page.locator(".dswFiles_rowName").allTextContents();
+  const rowNames = () => page.locator(".dswFiles_name").allTextContents();
   const row = (name) => page.locator(".dswFiles_row", {
-    has: page.locator(".dswFiles_rowName", { hasText: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) }),
+    has: page.locator(".dswFiles_name", { hasText: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) }),
   });
   const previewText = async () => (await root().locator(".dswFiles_previewPane").innerText().catch(() => "")) ?? "";
-  // A failed fetch renders the note both in the list area (where the loading
-  // status would be) and at the root, so target the first.
-  const errorNote = () => root().locator(".dswFiles_error").first();
   const until = async (fn, what, ms = 15_000) => {
     const t0 = Date.now();
     for (;;) {
@@ -261,28 +279,22 @@ function ui(page) {
       await page.waitForTimeout(250);
     }
   };
-  return { page, root, rowNames, row, previewText, errorNote, until };
-}
-
-// Enter an absolute path through the breadcrumb's ✎ editor.
-async function editPath(u, path) {
-  await u.root().locator(".dswFiles_crumbEditZone").click();
-  const input = u.root().locator(".dswFiles_pathInput");
-  await input.waitFor({ state: "visible", timeout: 5000 });
-  await input.fill(path);
-  await input.press("Enter");
-}
-
-// After a rejected path edit the crumb trail can hold the bad segments; the
-// root crumb (always segments[0]) resets the listing to the workspace root.
-async function backToRoot(u) {
-  await u.root().locator(".dswFiles_crumb").first().click();
-  await u.until(async () => (await u.rowNames()).includes("a.txt"), "back at fj root");
+  return { page, root, rowNames, row, previewText, until };
 }
 
 function checkConsole(session, label) {
   const ours = session.errors.filter((t) => /filez|filestab|dswFiles/i.test(t));
-  ok(session.pageErrors.length === 0, `no uncaught page errors (${label})\n` + session.pageErrors.join("\n").slice(0, 800));
+  // A dsh host bug (dsh BUG-028), not filestab's: a full page reload re-runs
+  // the client bundles' slot registration against a slot registry that
+  // survives the reload, and dsh-client-ui-tool's keyed "read_image" toolview
+  // entry throws. Filter the EXACT message (J19's reload step trips it) so a
+  // fix upstream shows up here as a new, unfiltered page error.
+  const dshReloadNoise = session.pageErrors.filter((t) =>
+    t.includes('keyed slot "tool.call.toolview" already has an entry for key "read_image"'));
+  const hostBugs = session.pageErrors.filter((t) =>
+    !t.includes('keyed slot "tool.call.toolview" already has an entry for key "read_image"'));
+  ok(hostBugs.length === 0, `no uncaught page errors (${label})\n` + hostBugs.join("\n").slice(0, 800));
+  if (dshReloadNoise.length > 0) console.log(`e2e: ${label}: ${dshReloadNoise.length} dsh reload-registration page error(s) ignored (host bug, filtered)`);
   ok(ours.length === 0, `no filestab console errors (${label})\n` + ours.join("\n").slice(0, 800));
   const benign = session.errors.length - ours.length;
   if (benign > 0) console.log(`e2e: ${label}: ${benign} benign console error(s) ignored`);
@@ -297,51 +309,16 @@ async function j1_firstLook(u) {
   const firstOpt = (await sel.locator("option").first().textContent()).trim();
   match(firstOpt, /^@ [0-9a-z]{12} base$/, `jj worktree row = @ + 12-char change id + description, got: ${firstOpt}`);
   const count = await u.root().locator(".dswFiles_statusCount").innerText();
-  match(count, /7/, `worktree rollup counts the 7 additions, got: ${count}`);
+  match(count, /6/, `worktree rollup counts the 6 additions, got: ${count}`);
   const names = await u.rowNames();
-  for (const n of ["sub", "a.txt", "big.bin", "doc.md", "page.html", "pic.png", "sneaky"]) {
+  for (const n of ["sub", "a.txt", "big.bin", "doc.md", "page.html", "pic.png"]) {
     ok(names.includes(n), `row ${n} present (have: ${names.join(", ")})`);
   }
   ok(!names.includes(".jj") && !names.includes(".git"), `hidden entries absent by default (have: ${names.join(", ")})`);
   eq((await u.row("a.txt").locator(".dswFiles_badge").innerText()).trim(), "A", "a.txt carries the A (added) badge");
   const footer = await u.root().locator(".dswFiles_footerBar").innerText();
-  ok(footer.includes("7 items"), `footer counts 7 items, got: ${footer.replace(/\n/g, " ")}`);
+  ok(footer.includes("6 items"), `footer counts 6 items, got: ${footer.replace(/\n/g, " ")}`);
   ok((await u.previewText()).includes("Select a file to preview"), "preview starts empty");
-}
-
-// J2: navigate -- folder rows, breadcrumbs, the path editor (valid + escape
-// rejected), hidden toggle, keyboard up.
-async function j2_navigation(u) {
-  await u.row("sub").click();
-  await u.until(async () => { const n = await u.rowNames(); return n.includes("nested.txt") && !n.includes("a.txt"); }, "into sub/");
-  eq((await u.rowNames()).length, 1, "sub/ lists only nested.txt");
-  const crumbs = u.root().locator(".dswFiles_crumb");
-  eq(await crumbs.count(), 2, "crumb trail: root › sub");
-  eq((await crumbs.last().textContent()).trim(), "sub", "current crumb is sub");
-  ok(await crumbs.last().isDisabled(), "current crumb is disabled");
-  // Up through the breadcrumb.
-  await crumbs.first().click();
-  await u.until(async () => (await u.rowNames()).includes("a.txt"), "breadcrumb back to root");
-  // Path editor: a valid relative path navigates.
-  await editPath(u, "sub");
-  await u.until(async () => (await u.rowNames()).includes("nested.txt"), "path edit into sub/");
-  // Path editor: an escape is rejected with an error note, nothing outside
-  // the workspace is ever shown.
-  await editPath(u, "../../etc");
-  await u.until(async () => (await u.errorNote().count()) > 0 && ((await u.errorNote().innerText()).trim() !== ""), "escape rejected");
-  ok(!(await u.previewText()).includes("root:"), "no /etc content after rejected escape");
-  await backToRoot(u);
-  // Hidden files toggle.
-  await u.root().locator(".dswFiles_showHiddenToggle").click();
-  await u.until(async () => (await u.rowNames()).includes(".jj"), "hidden entries visible");
-  await u.root().locator(".dswFiles_showHiddenToggle").click();
-  await u.until(async () => !(await u.rowNames()).includes(".jj"), "hidden entries hidden again");
-  // Keyboard: ArrowLeft from a row inside sub/ goes up one level.
-  await u.row("sub").click();
-  await u.until(async () => (await u.rowNames()).includes("nested.txt"), "into sub/ for keyboard nav");
-  await u.row("nested.txt").focus();
-  await u.page.keyboard.press("ArrowLeft");
-  await u.until(async () => (await u.rowNames()).includes("a.txt"), "ArrowLeft up one level");
 }
 
 // The pane defaults to Diff mode for a VCS-changed file; the content preview
@@ -463,68 +440,59 @@ async function j6_imagePreview(u) {
   ok(((await img.getAttribute("src")) ?? "").startsWith("data:image/png;base64,"), "PNG rendered from a data: URL");
 }
 
-// J18: every path-escape shape is rejected; the outside symlink is listed
-// but its read is refused.
-//
-// Two surfaces, two shapes (both since v0.1.2):
-//  - a real `..` escape reaches the server's containment check and is
-//    rejected → the ERROR NOTE in the list area (workspace-invalid-path).
-//  - an absolute path and an encoded-escape text never reach the server as
-//    escapes: the crumb editor re-roots them under the workspace (the leading
-//    "/" drops, "%2F" stays a literal name), so they resolve to MISSING
-//    folders. Since BUG-009 a missing non-root folder recovers to the root
-//    listing with a short "no longer exists" note (auto-clears in 8 s)
-//    instead of latching a raw error — the pin is the note + the root
-//    listing, never an error note, and never escaped content.
-async function j18_containment(u) {
-  await editPath(u, "../outside.txt");
-  await u.until(async () => (await u.errorNote().count()) > 0 && ((await u.errorNote().innerText()).trim() !== ""), "reject ../outside.txt");
-  ok(!(await u.previewText()).includes("root:") && !(await u.previewText()).includes("secret"), "../outside.txt: no escaped content shown");
-  await backToRoot(u);
-
-  for (const p of ["/etc/passwd", "..%2F..%2Fetc%2Fpasswd"]) {
-    await editPath(u, p);
-    await u.until(async () => (await u.root().locator(".dswFiles_status", { hasText: /no longer exists/ }).count()) > 0, `folder-gone note for ${p}`);
-    await u.until(async () => (await u.rowNames()).includes("a.txt"), `recovered at root after ${p}`);
-    ok(!(await u.previewText()).includes("root:") && !(await u.previewText()).includes("secret"), `${p}: no escaped content shown`);
-  }
-  ok((await u.rowNames()).includes("sneaky"), "outside symlink is still listed");
-  await u.row("sneaky").click();
-  // The file is diffable (status A), so the pane opens in Diff mode and the
-  // containment rejection surfaces as the diff error, not the preview error.
-  await u.until(async () => (await u.previewText()).includes("symlink escapes workspace"), "sneaky read refused");
-  ok(!(await u.previewText()).includes("root:"), "sneaky: no /etc/passwd content");
-}
-
-// J19: the left pane (browse list) collapses to give the preview and diff the
-// full width. Since BUG-011 one affordance owns each state: the header
-// toggle is EXPANDED-only and the pane-edge rail (the "thickened divider")
-// is COLLAPSED-only — collapsing unmounts the header button and mounts the
-// rail; expanding (rail click) does the reverse. The collapsed state persists
-// across a reload.
+// J19: the nav column (rightmost browse list) collapses to give the preview
+// and diff the full width. The toggle is a STATE PAIR — exactly one control
+// on screen at a time, one per state (the dsh host's right-pane pattern one
+// level down): expanded → a HIDE button (») in the nav's own header, at the
+// edge it collapses; collapsed → a RESTORE button («) in the view bar's right
+// end. The view bar renders only while a file is viewed, and the collapse
+// invariant keeps the nav expanded whenever nothing is viewed, so a hidden
+// nav always has a view bar to carry its restore button. Collapsing unmounts
+// the browse pane + divider and the view pane goes flush to the pane's right
+// edge. The collapsed state persists across a reload.
 async function j19_collapse(u) {
-  const btn = u.root().locator(".dswFiles_collapseBtn");
-  const rail = u.root().locator(".dswFiles_collapsedRail");
-  eq(await btn.count(), 1, "collapse toggle in the header while expanded");
-  eq(await rail.count(), 0, "no rail while expanded");
+  const hideBtn = u.root().locator(".dswFiles_header .dswFiles_navToggle");
+  const restoreBtn = u.root().locator(".dswFiles_paneToggle .dswFiles_navToggle");
+  // Journey precondition: at the fixture root with a file viewed.
+  await u.until(async () => (await u.rowNames()).includes("a.txt"), "a.txt listed (at the fixture root)");
+  await u.row("a.txt").click();
+  // Expanded state: the hide control sits in the nav's own header.
+  await u.until(async () => (await hideBtn.count()) === 1, "hide control present in the nav header");
+  eq(await restoreBtn.count(), 0, "no restore control while the nav is visible");
+  eq(await hideBtn.getAttribute("aria-expanded"), "true", "hide control reports the nav expanded");
   eq(await u.root().locator(".dswFiles_browsePane").count(), 1, "browse pane visible initially");
-  await btn.click();
-  eq(await u.root().locator(".dswFiles_browsePane").count(), 0, "browse pane hidden when collapsed");
+  eq(await u.root().locator(".dswFiles_collapsedRail").count(), 0, "no edge rail (the toggle lives in the nav header / view bar)");
+  eq((await u.root().locator(".dswFiles_paneHead").innerText()).trim(), "a.txt", "the viewed file's name rides in the view bar");
+  await hideBtn.click();
+  await u.until(async () => (await u.root().locator(".dswFiles_browsePane").count()) === 0, "browse pane hidden when collapsed");
   eq(await u.root().locator(".dswFiles_divider").count(), 0, "divider hidden when collapsed");
-  eq(await btn.count(), 0, "header toggle unmounts while collapsed (BUG-011)");
-  eq(await rail.count(), 1, "pane-edge rail is the re-opener while collapsed (BUG-011)");
-  await rail.click();
+  // Collapsed state: the restore control sits in the view bar's right end.
+  await u.until(async () => (await restoreBtn.count()) === 1, "restore control present in the view bar");
+  eq(await hideBtn.count(), 0, "no hide control while the nav is hidden");
+  eq(await restoreBtn.getAttribute("aria-expanded"), "false", "restore control reports the nav collapsed");
+  // The view pane took the nav's place flush to the pane's right edge.
+  const pb = await u.root().locator(".dswFiles_previewPane").boundingBox();
+  const rb = await u.root().boundingBox();
+  ok(Math.abs((pb.x + pb.width) - (rb.x + rb.width)) <= 1, "view pane flush at the pane's right edge when collapsed");
+  await restoreBtn.click();
   await u.until(async () => (await u.root().locator(".dswFiles_browsePane").count()) === 1, "browse pane restored");
-  eq(await rail.count(), 0, "rail unmounts when expanded");
-  // Persistence: collapse, reload, still collapsed.
-  await btn.click();
+  // Persistence: collapse, reload, still collapsed (the restored selection
+  // keeps the preference in force from the first render). 0.1.5 note: the
+  // right pane's OPEN state is host UI state that a full page reload drops
+  // (the sidebar reboots collapsed), so reopen it through the host's own
+  // expand button; the filestab state (selection + collapsed nav) comes back
+  // from its own storage on the first render.
+  await hideBtn.click();
   await u.until(async () => (await u.root().locator(".dswFiles_browsePane").count()) === 0, "collapsed again");
   await u.page.reload({ waitUntil: "domcontentloaded" });
-  await u.until(async () => (await u.root().count()) === 1, "Files tab back after reload", 30_000);
+  const expand = u.page.locator('[data-sidebar-right-expand]');
+  await u.until(async () => (await expand.count()) > 0, "conversation back after reload", 30_000);
+  await expand.click();
+  await u.until(async () => (await u.root().count()) === 1, "Files view back after reload", 30_000);
   eq(await u.root().locator(".dswFiles_browsePane").count(), 0, "collapsed state survives reload");
-  eq(await u.root().locator(".dswFiles_collapsedRail").count(), 1, "rail is the re-opener after reload");
+  await u.until(async () => (await restoreBtn.count()) === 1, "restore control back (selection restored)");
   // Leave it expanded for any later journeys.
-  await u.root().locator(".dswFiles_collapsedRail").click();
+  await restoreBtn.click();
   await u.until(async () => (await u.root().locator(".dswFiles_browsePane").count()) === 1, "restored for later journeys");
 }
 
@@ -532,7 +500,9 @@ async function j19_collapse(u) {
 async function j1_2_plain(u) {
   await u.until(async () => (await u.rowNames()).includes("hi.txt"), "plain listing");
   eq(await u.root().locator(".dswFiles_statusLine").count(), 0, "no VCS status line without a repo");
-  eq((await u.root().locator(".dswFiles_row .dswFiles_badge").first().innerText()).trim(), "", "no change badges without VCS");
+  // The current row model renders no letter slot at all for a change-less
+  // file, so assert absence (a .first().innerText() would hang forever).
+  eq(await u.root().locator(".dswFiles_row .dswFiles_badge").count(), 0, "no change badges without VCS");
   const footer = await u.root().locator(".dswFiles_footerBar").innerText();
   ok(footer.includes("3 items"), `footer counts 3 items, got: ${footer.replace(/\n/g, " ")}`);
   ok((await u.previewText()).includes("Select a file to preview"), "preview starts empty");
@@ -556,21 +526,17 @@ async function main() {
     console.log(`e2e: dsh web on ${url.replace(/token=[^\s]+/, "token=…")}`);
     browser = await chromium.launch({ executablePath: findChrome(), headless: true, args: ["--no-sandbox"] });
 
-    // F-JJ session: J1, J2, J3, J6, J18.
+    // F-JJ session: J1, J3, J6, J19.
     const a = await openSession(browser, { url, workspace: fx.fj });
     const ua = ui(a.page);
     await clickFilesTab(a.page);
     console.log("e2e: J1 first look (jj workspace)");
     await j1_firstLook(ua);
-    console.log("e2e: J2 navigate (folders, crumbs, path editor, hidden, keys)");
-    await j2_navigation(ua);
     console.log("e2e: J3 text preview (+ >1MB card)");
     await j3_textPreview(ua);
     console.log("e2e: J6 image preview");
     await j6_imagePreview(ua);
-    console.log("e2e: J18 path-escape containment");
-    await j18_containment(ua);
-    console.log("e2e: J19 left-pane collapse/expand");
+    console.log("e2e: J19 nav-pane collapse/expand (state pair)");
     await j19_collapse(ua);
     checkConsole(a, "fj");
     await a.context.close();
@@ -588,7 +554,7 @@ async function main() {
     checkConsole(b, "plain");
     await b.context.close();
 
-    console.log(`e2e: PASS -- ${assertions} assertions across J1, J1.2, J2, J3, J4, J5, J6, J18, J19`);
+    console.log(`e2e: PASS -- ${assertions} assertions across J1, J1.2, J3, J4, J5, J6, J19`);
   } catch (e) {
     // Best-effort failure screenshot, then clean up and rethrow.
     const pages = browser ? [...browser.contexts().flatMap((c) => c.pages())] : [];

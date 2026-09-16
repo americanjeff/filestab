@@ -66,10 +66,10 @@ export type SnapshotListingResult =
 
 /**
  * One directory of a commit's snapshot: scoped `jj file list` →
- * snapshotDirListing. A dir that exists only in history still resolves.
- * resolveInWorkspace walks to the deepest EXISTING ancestor. The function
- * returns {error} shapes for jj failures. A containment violation throws
- * WorkspacePathError (the RPC boundary maps it to `forbidden`).
+ * snapshotDirListing. A dir that exists only in history still resolves
+ * (resolveInWorkspace is lexical and never requires the path to exist). The
+ * function returns {error} shapes for jj failures. A containment violation
+ * throws WorkspacePathError (the RPC boundary maps it to `forbidden`).
  */
 export async function snapshotListing(
   workspaceRoot: string,
@@ -149,13 +149,10 @@ export async function fileShow(workspaceRoot: string, rev: string, relPath: stri
   return finishFileShow(buf, clean);
 }
 
-/**
- * fileshow with `rev: "worktree"`, the LIVE worktree file on disk:
- * a plain contained read, no VCS subprocess.
- */
-export async function worktreeFileShow(workspaceRoot: string, relPath: string): Promise<FileShowResult> {
-  const clean = String(relPath ?? "").replace(/\/+$/, "");
-  const abs = await resolveInWorkspace(workspaceRoot, clean);
+// The live-file read core: stat (isFile), capped read, classify. The caller
+// owns path validation — worktreeFileShow containment-checks first,
+// absoluteFileShow validates absoluteness instead.
+async function readLiveFile(abs: string, name: string): Promise<FileShowResult> {
   let st: Stats;
   try { st = await stat(abs); }
   catch { return { error: "not-found", message: "file not found" }; }
@@ -165,8 +162,31 @@ export async function worktreeFileShow(workspaceRoot: string, relPath: string): 
     const want = Math.min(st.size, FILE_SHOW_CAP + 4096);
     const buf = Buffer.alloc(want);
     const { bytesRead } = await fh.read(buf, 0, want, 0);
-    return finishFileShow(buf.subarray(0, bytesRead), clean, st.size);
+    return finishFileShow(buf.subarray(0, bytesRead), name, st.size);
   } finally {
     await fh.close().catch(() => {});
   }
+}
+
+/**
+ * fileshow with `rev: "worktree"`, the LIVE worktree file on disk:
+ * a plain contained read, no VCS subprocess.
+ */
+export async function worktreeFileShow(workspaceRoot: string, relPath: string): Promise<FileShowResult> {
+  const clean = String(relPath ?? "").replace(/\/+$/, "");
+  const abs = await resolveInWorkspace(workspaceRoot, clean);
+  return readLiveFile(abs, clean);
+}
+
+// fileshow-abs: a LIVE file by ABSOLUTE path, outside the session
+// workspace. The session is the scope (the caller resolves it); the path is
+// the caller's, so there is no containment — the caller is the session
+// owner, and the read is capped + classified exactly like a worktree read.
+// POSIX absolute (/…) and Windows (C:… / UNC //…) forms pass the gate;
+// anything else is a bad request.
+export async function absoluteFileShow(absPath: string): Promise<FileShowResult> {
+  const clean = String(absPath ?? "");
+  if (clean.includes("\u0000") || !/^(\/|[A-Za-z]:[\\/]|\/\/)/.test(clean))
+    return { error: "bad-request", message: "path must be absolute" };
+  return readLiveFile(clean, clean);
 }

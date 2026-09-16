@@ -1,12 +1,16 @@
 // Workspace path containment for filestab's read-only file browser.
 //
-// All host-side FS access resolves through here. The (untrusted) client cannot
-// read outside the current session's workspace root. This is the security core
-// of the plugin: the browse endpoints (list / diff / fileshow) touch only paths
-// this function proves to be inside the workspace.
+// All host-side FS access resolves through here. Containment is LEXICAL: the
+// code checks the path TEXT (no absolute paths, no `..` climbing above the
+// root) and does not follow symlinks to re-check. A symlink inside the
+// workspace that points outside is therefore readable — deliberate, for a
+// local, operator-controlled tool: a link target the user could already read
+// is not a new privilege, so the plugin does not pay to block it. The browse
+// endpoints (list / diff / fileshow) touch only paths whose spelling stays
+// inside the session's workspace root.
 
 import { realpath } from "node:fs/promises";
-import { resolve, dirname, basename, isAbsolute, sep } from "node:path";
+import { resolve, isAbsolute, sep } from "node:path";
 
 /** 403-class marker: the handler catches this by name and maps it to the RPC `forbidden` code (wire: `workspace-invalid-path`), not `internal`. */
 export class WorkspacePathError extends Error {
@@ -27,9 +31,6 @@ function underRoot(root: string, p: string): boolean {
  * Rules:
  *  - `""` or `"/"`  → the workspace root itself.
  *  - an absolute path, or a `..` that climbs above the root → WorkspacePathError.
- *  - a symlink (or symlinked directory) that points outside the root →
- *    WorkspacePathError (the code realpaths the path against its deepest
- *    EXISTING ancestor, then re-checks it).
  *  - the resolved path need not exist. Callers decide how to report a
  *    missing file/directory (this guarantees containment only, not existence).
  *
@@ -52,35 +53,12 @@ export async function resolveInWorkspace(workspaceRoot: string, relPath = ""): P
   const clean = raw.replace(/^\/+/, "");                // safety net (no-op for non-absolute)
   if (clean === "") return root;
 
-  // 1) Lexical containment: resolve(root, clean) cancels `..`. If the result
-  //    still sits above the root, the code rejects it outright.
+  // Lexical containment: resolve(root, clean) cancels `..`. If the result
+  // still sits above the root, the code rejects it outright. Symlinks are not
+  // followed (see the file header).
   const target = resolve(root, clean);
   if (!underRoot(root, target)) {
     throw new WorkspacePathError(`path escapes workspace: ${relPath}`);
   }
-
-  // 2) Symlink containment: the code walks up to the deepest EXISTING ancestor,
-  //    realpaths it, re-checks it is still under the root, then re-joins any
-  //    non-existent tail.
-  let dir = target;
-  const tail: string[] = [];
-  for (;;) {
-    try {
-      const realDir = await realpath(dir);
-      if (!underRoot(root, realDir)) {
-        throw new WorkspacePathError(`symlink escapes workspace: ${relPath}`);
-      }
-      return tail.length ? resolve(realDir, ...tail.reverse()) : realDir;
-    } catch (err) {
-      if (err instanceof WorkspacePathError) throw err;
-      if (dir === root) return target; // root is real (realpath'd above). The code falls back to the target
-      const code = (err as { code?: string } | null)?.code;
-      if (code === "ENOENT" || code === "ENOTDIR") {
-        tail.push(basename(dir));
-        dir = dirname(dir);
-        continue;
-      }
-      throw err;
-    }
-  }
+  return target;
 }

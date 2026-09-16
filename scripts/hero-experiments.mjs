@@ -3,7 +3,7 @@
 // Boots the same sandboxed dsh + fixture as capture-readme-shots.mjs (EN,
 // dark), lands on the flagship scene (worktree root, README.md selected,
 // diff showing), narrows the file-listing pane by dragging the divider the
-// app's own way (pointer events, settles leftW state), then captures
+// app's own way (pointer events, settles navW state), then captures
 // candidates with different zoom and bottom-crop depths:
 //
 //   test/e2e/out/hero-alts/<name>.png
@@ -46,7 +46,7 @@ async function landOnDiff(page, tabLabel = "Files") {
   await root().waitFor({ state: "visible", timeout: 15_000 });
   await root().locator(".dswFiles_statusSelect").waitFor({ state: "visible", timeout: 20_000 });
   await root().locator(".dswFiles_row", {
-    has: page.locator(".dswFiles_rowName", { hasText: /^README\.md$/ }),
+    has: page.locator(".dswFiles_name", { hasText: /^README\.md$/ }),
   }).click();
   await root().locator(".dswFiles_diffHead").waitFor({ state: "visible", timeout: 20_000 });
   await page.waitForTimeout(500);
@@ -55,14 +55,15 @@ async function landOnDiff(page, tabLabel = "Files") {
 async function readNavWidth(page) {
   return page.evaluate(() => {
     const el = document.querySelector(".dswFiles_body");
-    const w = parseFloat(getComputedStyle(el).getPropertyValue("--filez-left"));
+    const w = parseFloat(getComputedStyle(el).getPropertyValue("--filez-nav"));
     return Number.isFinite(w) ? w : 340;
   });
 }
 
 // Drag the divider the app's way: pointerdown on it, move, pointerup. The
-// handler settles leftW state on pointerup, so the width is persisted via
+// handler settles navW state on pointerup, so the width is persisted via
 // the real code path (clamped to 220..body-16*2-6-320 by the app itself).
+// The nav column is rightmost, so growing it drags the divider LEFT.
 async function setNavWidth(page, target) {
   const cur = await readNavWidth(page);
   if (Math.abs(cur - target) < 1) return cur;
@@ -72,7 +73,7 @@ async function setNavWidth(page, target) {
   const x0 = box.x + box.width / 2;
   await page.mouse.move(x0, y);
   await page.mouse.down();
-  await page.mouse.move(x0 + (target - cur), y, { steps: 8 });
+  await page.mouse.move(x0 + (cur - target), y, { steps: 8 });
   await page.mouse.up();
   await page.waitForTimeout(400);
   const after = await readNavWidth(page);

@@ -310,6 +310,27 @@ const gcall = (endpoint, payload) => __test.makeBrowseHandler(gitCtx)(endpoint, 
   n++;
 }
 {
+  // The KEYWORD bases: worktree = `git diff HEAD` — the old side reads
+  // HEAD, the new side is the LIVE disk bytes (an untracked file has no git
+  // object at all). The commit base = `git diff HEAD~1 HEAD`, which detects
+  // renames natively (the -M name-status recovery is a `git show` concern).
+  // The bytes: the rename block's GPNG1/GPNG2 (re-derived, its scope is
+  // closed) — new.png holds GPNG2 at HEAD, the worktree edit flips it to
+  // the GPNG1 bytes.
+  const WPNG = Buffer.concat([Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64"), Buffer.from("ABCD".repeat(25000))]);
+  const WOLD = Buffer.from(WPNG); WOLD[50000] ^= 0x42; WOLD[60000] ^= 0x42; WOLD[70000] ^= 0x42;
+  await writeFile(join(ws, "new.png"), WPNG); // live edit (HEAD holds WOLD)
+  const rw = await gcall("diff", { sessionId: "git-sess", relPath: "new.png", base: "worktree" });
+  ok(rw.ok && rw.value.binary && rw.value.binary.old && rw.value.binary.new, "worktree-base binary diff carries both sides: " + JSON.stringify(rw?.value && Object.keys(rw.value)).slice(0, 200));
+  assert.strictEqual(Buffer.from(rw.value.binary.old.data, "base64").toString("hex"), WOLD.toString("hex"), "worktree base: OLD side = the HEAD bytes");
+  assert.strictEqual(Buffer.from(rw.value.binary.new.data, "base64").toString("hex"), WPNG.toString("hex"), "worktree base: NEW side = the LIVE disk bytes");
+  const rc = await gcall("diff", { sessionId: "git-sess", relPath: "new.png", base: "commit" });
+  ok(rc.ok && rc.value.binary && rc.value.binary.old && rc.value.binary.new, "commit-base (the rename commit) carries both sides: " + JSON.stringify(rc?.value && Object.keys(rc.value)).slice(0, 200));
+  assert.strictEqual(Buffer.from(rc.value.binary.old.data, "base64").toString("hex"), WPNG.toString("hex"), "commit base: OLD side = HEAD~1 under the OLD name (native rename detection)");
+  assert.strictEqual(Buffer.from(rc.value.binary.new.data, "base64").toString("hex"), WOLD.toString("hex"), "commit base: NEW side = HEAD under the new name");
+  n++;
+}
+{
   // fileshow dispatches to git (the verdict was set by the list@rev above)
   const r = await gcall("fileshow", { sessionId: "git-sess", relPath: "c1.txt", rev: midSha.slice(0, 12) });
   ok(r.ok && r.value.kind === "text" && r.value.text === "first extra\n", "fileshow bytes at a git rev: " + JSON.stringify(r).slice(0, 200));

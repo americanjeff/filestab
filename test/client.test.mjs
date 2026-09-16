@@ -25,11 +25,15 @@ Object.defineProperty(globalThis, "localStorage", {
 // 1) The factory's `require` is a param; the bundle is a classic script.
 //    Compile it with fake window/require, throws SyntaxError if the body is bad.
 const loaded = {};
+// Effects are COLLECTED, not run: a render that needs its effects flushed
+// (the right-column redirect test) drains pendingEffects by hand.
+let pendingEffects = [];
 const fakeReact = {
   createElement: (t, p, ...c) => ({ t, p, c }),
   useState: (i) => [typeof i === "function" ? i() : i, () => {}],
-  useEffect: () => {},
+  useEffect: (fn) => { pendingEffects.push(fn); },
   useRef: (i) => ({ current: i }),
+  useMemo: (fn) => fn(),
   Fragment: "Fragment",
 };
 // The TSX build uses the automatic JSX runtime (react/jsx-runtime): the
@@ -53,11 +57,13 @@ assert.strictEqual(typeof loaded.reg.factory, "function", "factory is a function
 
 const mod = loaded.reg.factory(fakeRequire);
 assert.strictEqual(mod.name, "filestab", "plugin name");
-assert.deepStrictEqual(mod.inject, ["slots", "locale", "connection"], "service inject list");
+assert.deepStrictEqual(mod.inject, ["slots", "locale", "connection", "sidebarRightTabs"], "service inject list");
 assert.strictEqual(typeof mod.apply, "function", "apply present");
 
 // 3) apply with a fake ctx: registers the tab, inject face wires rpc.call → unwrap.
-let registered = null;
+let registered = null;      // the conversation.view entry (the last of that slot)
+let registeredRight = null; // the sidebar.right.pane.tab keyed body
+let tabDef = null;          // the sidebarRightTabs type definition
 const ctx = {
   effect: (fn) => { try { fn(); } catch (e) { } },
   locale: { register: () => () => {}, bind: () => (k) => k },
@@ -81,15 +87,22 @@ const ctx = {
   },
   slots: {
     inject: (slot, cb) => {
-      assert.strictEqual(slot, "conversation.view", "slot");
+      assert.ok(slot === "conversation.view" || slot === "sidebar.right.pane.tab", "slot: " + slot);
       const r = cb();
       return typeof r === "function" ? r : () => {};
     },
-    register: (opts, comp) => { registered = { opts, comp }; return () => {}; },
+    register: (opts, comp) => {
+      if (opts.name === "conversation.view") registered = { opts, comp };
+      else if (opts.name === "sidebar.right.pane.tab") registeredRight = { opts, comp };
+      return () => {};
+    },
   },
+  // No sidebarRightTabs: this first apply plays the LEGACY host (pre-0.1.5,
+  // no right column) — the conversation Files tab is the surface. The
+  // right-column section below re-applies with a 0.1.5+ ctx.
 };
 mod.apply(ctx);
-assert.ok(registered, "tab registered");
+assert.ok(registered, "tab registered (legacy host: the conversation tab is the surface)");
 assert.strictEqual(registered.opts.id, "files", "tab id");
 assert.strictEqual(registered.opts.order, 20, "tab order");
 assert.strictEqual(typeof registered.opts.label, "function", "label is a function");
@@ -105,7 +118,7 @@ const dres = await face.fetchDiff("sub/a.txt", "commit");
 assert.ok(typeof dres.patch === "string" && dres.base === "commit", "fetchDiff unwraps the host diff value");
 
 // 5) Render the component body with the fake React, catches reference/syntax
-//    errors in the FilesView render path (two-pane body, rows, breadcrumb, footer).
+//    errors in the FilesView render path (two-pane body, tree rows, header, footer).
 const view = registered.comp({
   t: (k) => k,
   listDirectory: (p, s, h) => Promise.resolve({ root: "/ws", relPath: p, entries: [
@@ -166,20 +179,56 @@ assert.strictEqual(H.formatBytes(5 * 1024 * 1024), "5 MB", "bytes: MB");
 assert.strictEqual(H.formatBytes(1536), "1.5 KB", "bytes: fractional KB");
 
 // 7) Per-session view-state persistence (localStorage, installed at the top),
-//    the building blocks for "a refresh restores the directory + selection".
+//    the building blocks for "a refresh restores the tree + selection".
 const rootSeg = { name: "view.files", path: "" };
 assert.deepStrictEqual(H.segmentsForPath(rootSeg, "").map((s) => s.path), [""], "segmentsForPath: empty → root only");
 assert.deepStrictEqual(H.segmentsForPath(rootSeg, "a/b").map((s) => s.path), ["", "a", "a/b"], "segmentsForPath: path → chain");
 assert.deepStrictEqual(H.segmentsForPath(rootSeg, "a/b/").map((s) => s.path), ["", "a", "a/b"], "segmentsForPath: trailing slash trimmed");
-H.saveState("sess-p", "docs/sub", "docs/sub/note.md", 432);
+// Tree model: directories first, then natural (numeric-aware) name.
+assert.deepStrictEqual(H.orderEntries([
+  { name: "file2", path: "file2", isDirectory: false },
+  { name: "zz", path: "zz", isDirectory: true },
+  { name: "file10", path: "file10", isDirectory: false },
+  { name: "AA", path: "AA", isDirectory: true },
+]).map((e) => e.name), ["AA", "zz", "file2", "file10"], "orderEntries: dirs first, numeric-aware names");
+// The External section's address reconstruction. dsh 0.1.5 drops the leading
+// "/" from an out-of-workspace absolute path, so /tmp/x.md arrives as
+// "tmp/x.md"; the exact original is "/" + that text. Windows drive/UNC forms
+// survive the address encoding as segments and pass through untouched. The
+// host stat-verifies the candidate before it is pinned — a wrong guess fails.
+assert.strictEqual(H.toAbsoluteCandidate("tmp/file-created.md"), "/tmp/file-created.md", "toAbsoluteCandidate: a POSIX relative regains its leading slash");
+assert.strictEqual(H.toAbsoluteCandidate("/tmp/file-created.md"), "/tmp/file-created.md", "toAbsoluteCandidate: an absolute POSIX path passes through");
+assert.strictEqual(H.toAbsoluteCandidate("  /tmp/x.md  "), "/tmp/x.md", "toAbsoluteCandidate: surrounding whitespace is trimmed");
+assert.strictEqual(H.toAbsoluteCandidate("C:/Users/jlb/a.md"), "C:/Users/jlb/a.md", "toAbsoluteCandidate: a Windows drive path passes through");
+assert.strictEqual(H.toAbsoluteCandidate("C:\\Users\\jlb\\a.md"), "C:\\Users\\jlb\\a.md", "toAbsoluteCandidate: a Windows backslash path passes through");
+assert.strictEqual(H.toAbsoluteCandidate("//server/share/a.md"), "//server/share/a.md", "toAbsoluteCandidate: a UNC path passes through");
+assert.strictEqual(H.toAbsoluteCandidate(""), null, "toAbsoluteCandidate: empty → null");
+assert.strictEqual(H.toAbsoluteCandidate("   "), null, "toAbsoluteCandidate: whitespace → null");
+
+H.saveState("sess-p", ["docs", "docs/sub"], "docs/sub/note.md", 432, null, false, [], null);
 const round = H.loadState("sess-p");
-assert.strictEqual(round.path, "docs/sub", "loadState: restored path");
+assert.deepStrictEqual(round.expanded, ["", "docs", "docs/sub"], "loadState: restored expanded set (root implied)");
 assert.strictEqual(round.selected, "docs/sub/note.md", "loadState: restored selection");
-assert.strictEqual(round.leftW, 432, "loadState: restored divider width");
+assert.strictEqual(round.navW, 432, "loadState: restored divider width");
+assert.deepStrictEqual(round.external, [], "loadState: no external pins → an empty set");
+assert.strictEqual(round.selectedExternal, null, "loadState: no external selection → null");
 assert.strictEqual(H.loadState("sess-other"), null, "loadState: other session → null");
-H.saveState("sess-p", "", null);
+// The External section's persistence: the pinned set + its (exclusive) selection.
+H.saveState("sess-ext2", ["docs"], null, null, null, false, ["/tmp/ext.md", "/var/log/x.log"], "/var/log/x.log");
+assert.deepStrictEqual(H.loadState("sess-ext2").external, ["/tmp/ext.md", "/var/log/x.log"], "loadState: the external pin set round-trips");
+assert.strictEqual(H.loadState("sess-ext2").selectedExternal, "/var/log/x.log", "loadState: the restored external selection");
+assert.strictEqual(H.loadState("sess-ext2").selected, null, "an external selection never sets the tree selection (mutual exclusion)");
+H.saveState("sess-p", [], null, null, null, false, [], null);
 assert.strictEqual(H.loadState("sess-p").selected, null, "loadState: cleared selection → null");
-assert.strictEqual(H.loadState("sess-p").leftW, null, "saveState without a width stores null (CSS default)");
+assert.strictEqual(H.loadState("sess-p").navW, null, "saveState without a width stores null (CSS default)");
+assert.deepStrictEqual(H.loadState("sess-p").expanded, [""], "saveState: empty expanded set → root only");
+assert.deepStrictEqual(H.loadState("sess-p").external, [], "loadState: cleared external set");
+assert.strictEqual(H.loadState("sess-p").selectedExternal, null, "loadState: cleared external selection");
+// A pre-tree saved blob (a single `path`) migrates to the ancestor chain.
+globalThis.localStorage.setItem("filestab/files/sess-legacy", JSON.stringify({ path: "docs/sub", selected: "docs/sub/note.md" }));
+assert.deepStrictEqual(H.loadState("sess-legacy").expanded, ["", "docs", "docs/sub"], "loadState: legacy path migrates to the ancestor chain");
+assert.deepStrictEqual(H.loadState("sess-legacy").external, [], "loadState: a pre-external blob has an empty external set");
+assert.strictEqual(H.loadState("sess-legacy").selectedExternal, null, "loadState: a pre-external blob has no external selection");
 // Render with a real sessionId + storage present, loadState runs in the state
 // initializer, so this catches a throw in the restore path.
 const view2 = registered.comp({ t: (k) => k, sessionId: "sess-p", listDirectory: (p) => Promise.resolve({ root: "/ws", relPath: p, entries: [] }) });
@@ -188,7 +237,7 @@ assert.ok(view2 && typeof view2 === "object", "FilesView renders with a sessionI
 globalThis.localStorage.setItem("filestab/files/sess-bad", "{not json");
 const view3 = registered.comp({ t: (k) => k, sessionId: "sess-bad", listDirectory: (p) => Promise.resolve({ root: "/ws", relPath: p, entries: [] }) });
 assert.ok(view3 && typeof view3 === "object", "FilesView renders over a corrupt saved state (no throw)");
-// The divider's width lives in the --filez-left CSS var on the body element,
+// The divider's width lives in the --filez-nav CSS var on the body element,
 // not React state, no state churn during the drag.
 const findDivider = (function find(node, out) {
   if (out === undefined) out = [];
@@ -202,9 +251,15 @@ assert.strictEqual(findDivider.length, 1, "FilesView renders one divider");
 assert.strictEqual(findDivider[0].p.role, "separator", "divider: role=separator");
 assert.strictEqual(typeof findDivider[0].p.onPointerDown, "function", "divider: draggable (onPointerDown)");
 assert.strictEqual(typeof findDivider[0].p.onDoubleClick, "function", "divider: double-click reset");
-// BUG-011: the collapsed-state cue at the pane edge — a restored collapsed
-// session renders the accent rail (the "thickened divider") and the browse
-// pane + divider unmount; the expanded view has no rail.
+// The nav column's toggle is a state pair: a HIDE control in the nav's own
+// header (rendered here, always, while the nav shows) and a RESTORE control
+// in the view bar's right end (the view bar renders only while a file is
+// viewed). With nothing viewed the stored collapsed preference cannot apply —
+// the nav stays expanded (the only way to pick a file). Both renders below
+// have no selection: the nav (with its hide control) and divider show, there
+// is no view bar (hence no restore control), and the old rail affordances
+// are gone. (The hidden branch — a file viewed while collapsed — needs live
+// state, so e2e covers it.)
 const findCls = (node, cls) => (function find(node, out) {
   if (out === undefined) out = [];
   if (Array.isArray(node)) { for (const ch of node) find(ch, out); return out; }
@@ -213,19 +268,86 @@ const findCls = (node, cls) => (function find(node, out) {
   if (node.c) find(node.c, out);
   return out;
 })(node);
-globalThis.localStorage.setItem("filestab/files/sess-collapsed", JSON.stringify({ path: "", selected: null, leftW: null, rev: null, collapsed: true }));
+globalThis.localStorage.setItem("filestab/files/sess-collapsed", JSON.stringify({ path: "", selected: null, navW: null, rev: null, collapsed: true }));
 const viewCollapsed = registered.comp({ t: (k) => k, sessionId: "sess-collapsed", listDirectory: (p) => Promise.resolve({ root: "/ws", relPath: p, entries: [] }) });
-const rail = findCls(viewCollapsed, "dswFiles_collapsedRail");
-assert.strictEqual(rail.length, 1, "collapsed: the pane-edge rail renders");
-assert.strictEqual(rail[0].p.role, "button", "rail: role=button");
-assert.strictEqual(rail[0].p["aria-label"], "files.expandNav", "rail: labeled as the expand action");
-assert.strictEqual(typeof rail[0].p.onClick, "function", "rail: clickable (expands)");
-assert.strictEqual(typeof rail[0].p.onKeyDown, "function", "rail: keyboard (Enter/Space)");
-assert.strictEqual(findCls(rail[0], "dswFiles_railGlyph").length, 1, "rail: carries the pane glyph (the JetBrains-stripe idiom, not a bare color)");
-assert.strictEqual(findCls(viewCollapsed, "dswFiles_divider").length, 0, "collapsed: the divider unmounts");
-assert.strictEqual(findCls(view2, "dswFiles_collapsedRail").length, 0, "expanded: no rail");
-assert.strictEqual(findCls(viewCollapsed, "dswFiles_collapseBtn").length, 0, "collapsed: the header button unmounts (one affordance per state — no double icon)");
-assert.strictEqual(findCls(view2, "dswFiles_collapseBtn").length, 1, "expanded: the header button renders");
+assert.strictEqual(findCls(viewCollapsed, "dswFiles_browsePane").length, 1, "collapsed pref + nothing viewed: the nav stays expanded");
+assert.strictEqual(findCls(viewCollapsed, "dswFiles_divider").length, 1, "invariant: the divider renders with the nav");
+assert.strictEqual(findCls(viewCollapsed, "dswFiles_bodyNavHidden").length, 0, "invariant: no flush class while the nav is shown");
+assert.strictEqual(findCls(viewCollapsed, "dswFiles_paneToggle").length, 0, "no selection: the view bar renders only while a file is viewed");
+assert.strictEqual(findCls(viewCollapsed, "dswFiles_collapsedRail").length, 0, "the old pane-edge rail is gone");
+assert.strictEqual(findCls(view2, "dswFiles_bodyNavHidden").length, 0, "expanded: no flush class");
+assert.strictEqual(findCls(view2, "dswFiles_paneToggle").length, 0, "expanded + no selection: no view bar");
+assert.strictEqual(findCls(view2, "dswFiles_navToggle").length, 1, "nav visible → the state pair's hide control rides in the nav's header");
+
+// ---- External section: files OUTSIDE the workspace ----
+// A generic predicate finder (the className helper above is too narrow for
+// data-attributes and component props).
+const findEl = (node, pred) => (function find(node, out) {
+  if (out === undefined) out = [];
+  if (Array.isArray(node)) { for (const ch of node) find(ch, out); return out; }
+  if (!node || typeof node !== "object") return out;
+  if (pred(node)) out.push(node);
+  if (node.c) find(node.c, out);
+  return out;
+})(node);
+const childText = (n) => Array.isArray(n.c) ? n.c.filter((x) => typeof x === "string").join("") : (typeof n.c === "string" ? n.c : "");
+
+// The pinned set + its selection restore from the per-session state (the
+// useState initializers read loadState), so seeding localStorage drives the
+// FIRST render: the band shows, the rows carry their absolute paths, the
+// selection is marked, and the preview pane is keyed by the ABSOLUTE path
+// (no status/rev/changeset — the file lives outside the workspace).
+globalThis.localStorage.setItem("filestab/files/sess-ext", JSON.stringify({
+  path: "", selected: null, navW: null, rev: null, collapsed: false,
+  external: ["/tmp/notes.md", "/var/log/app.log"], selectedExternal: "/tmp/notes.md",
+}));
+const viewExt = registered.comp({
+  t: (k) => k, sessionId: "sess-ext",
+  listDirectory: (p) => Promise.resolve({ root: "/ws", relPath: p, entries: [] }),
+  readAt: (rel) => Promise.resolve({ kind: "text", type: "text/plain", text: "rel" }),
+  readAtAbs: (abs) => Promise.resolve({ kind: "text", type: "text/markdown", text: "# ext" }),
+  fetchDiff: () => Promise.resolve({ patch: "" }),
+  readMermaid: () => Promise.resolve({ text: "" }),
+});
+assert.ok(viewExt && typeof viewExt === "object", "FilesView renders with a restored external selection (no throw)");
+// The band renders (a non-empty pin set) and carries one row per pinned file.
+assert.strictEqual(findCls(viewExt, "dswFiles_extSection").length, 1, "a pinned external set renders the band");
+const extRows = findEl(viewExt, (n) => n.p && n.p["data-files-entry"] === "external");
+assert.strictEqual(extRows.length, 2, "one row per pinned external file");
+assert.deepStrictEqual(extRows.map((r) => r.p["data-files-path"]).sort(), ["/tmp/notes.md", "/var/log/app.log"], "rows are keyed by their absolute path");
+// The selected row is marked; the other is not.
+const extRowBtn = (path) => {
+  const li = extRows.find((r) => r.p["data-files-path"] === path);
+  return li ? findEl(li, (n) => typeof n.p?.className === "string" && n.p.className.includes("dswFiles_row"))[0] : null;
+};
+assert.ok(extRowBtn("/tmp/notes.md") && extRowBtn("/tmp/notes.md").p.className.includes("dswFiles_rowSelected"), "the selected external row is marked");
+assert.ok(extRowBtn("/var/log/app.log") && !extRowBtn("/var/log/app.log").p.className.includes("dswFiles_rowSelected"), "an unselected external row is not marked");
+// Each row splits the basename (full ink) from its directory (dimmed).
+assert.deepStrictEqual(findEl(viewExt, (n) => n.p && n.p.className === "dswFiles_name").map(childText).sort(), ["app.log", "notes.md"], "external rows show their basenames");
+assert.deepStrictEqual(findEl(viewExt, (n) => n.p && n.p.className === "dswFiles_extDir").map(childText).sort(), ["/tmp/", "/var/log/"], "external rows show their directory part (trailing slash)");
+// The preview pane is keyed by the selected external's ABSOLUTE path: no
+// status/rev/changeset, and it reads through readAtAbs.
+const pane = findEl(viewExt, (n) => n.p && n.p.absPath !== undefined && n.p.readAtAbs !== undefined)[0];
+assert.ok(pane, "the preview pane element is present");
+assert.strictEqual(pane.p.absPath, "/tmp/notes.md", "the pane is keyed by the selected external's absolute path");
+assert.strictEqual(pane.p.relPath, null, "an external view has no workspace relPath");
+assert.strictEqual(pane.p.name, "notes.md", "the pane shows the external basename");
+assert.strictEqual(pane.p.status, null, "an external file has no VCS status");
+assert.strictEqual(pane.p.base, "worktree", "an external file has no diff base");
+assert.strictEqual(pane.p.rev, null, "an external file has no commit rev");
+assert.strictEqual(pane.p.changesetKnown, false, "an external file's changeset is unknown");
+assert.strictEqual(typeof pane.p.readAtAbs, "function", "the pane reads externals through readAtAbs");
+// An external file is never diffable: the pane offers view/preview only.
+assert.deepStrictEqual(H.paneToggleModes(false, "notes.md"), ["view", "preview"], "a non-diffable markdown offers view + preview, no diff");
+assert.deepStrictEqual(H.paneToggleModes(true, "notes.md"), ["diff", "view", "preview"], "a diffable markdown offers diff + view + preview");
+assert.strictEqual(H.resolvePaneMode("auto", false, "notes.md"), "preview", "auto for a non-diffable markdown → preview (never diff)");
+assert.strictEqual(H.resolvePaneMode("auto", false, "app.log"), "view", "auto for a non-diffable plain file → view");
+assert.strictEqual(H.resolvePaneMode("diff", false, "notes.md"), "view", "an explicit diff on a non-diffable file falls back to view");
+// Nothing pinned: the band is absent (zero space) and the footer's manual
+// "Open file…" affordance is the only entry point.
+assert.strictEqual(findCls(view2, "dswFiles_extSection").length, 0, "no pins: the external band is absent");
+assert.strictEqual(findEl(view2, (n) => n.p && n.p["data-files-entry"] === "external").length, 0, "no pins: no external rows");
+assert.strictEqual(findEl(view2, (n) => n.p && n.p.className === "dswFiles_footerAction" && childText(n) === "files.openFile").length, 1, "the footer offers the manual open affordance");
 delete globalThis.localStorage;
 
 // 8) Unified-diff parser (M2), table tests against the golden fixtures, which
@@ -532,13 +654,14 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
     assert.deepStrictEqual(imgs8.map((i) => i.p.src), ["data:image/png;base64,AA", "data:image/png;base64,BB"], "renamed binary: old then new data URLs");
     const el9 = D.DiffView({ model: rnModel, truncated: false, t });
     assert.strictEqual(findClass(el9, "dswFiles_diffBinaryRow").length, 0, "rename without bytes: no image row (text path)"); }
-  // C3: a deleted file's header shows its REAL path (its newPath is the
-  // /dev/null placeholder).
+  // C3: the file's name is the PANE's general header (fed by the listing's
+  // entry name), so a deleted file's /dev/null newPath can never be printed
+  // as a name. The diff view's sticky head keeps only the diff meta.
   { const delModel = D.parseDiff(fx("delete.txt")).files[0];
     const el7 = D.DiffView({ model: delModel, truncated: false, t });
-    const nameEl = findClass(el7, "dswFiles_diffName")[0];
-    const nameText = nameEl && Array.isArray(nameEl.c) ? nameEl.c[0] : nameEl && nameEl.c;
-    assert.strictEqual(nameText, "del.txt", "header = the real path, not /dev/null: " + JSON.stringify(nameText)); }
+    assert.strictEqual(findClass(el7, "dswFiles_paneHead").length, 0, "the diff view no longer carries the file's name (the pane header does)");
+    const metaEl = findClass(el7, "dswFiles_diffMeta")[0];
+    assert.strictEqual(metaEl && Array.isArray(metaEl.c) ? metaEl.c[0] : null, "files.diffDeleted", "the deleted file's diff head keeps its meta row (fake t = identity)"); }
   // Unified (narrow) mode: the no-newline marker must not corrupt the line
   // text, regression for `[object Object]` leaking into the cell (a React
   // element string-concatenated onto the text).
@@ -588,6 +711,46 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
   assert.deepStrictEqual(D.paneToggleModes(false, "a.md"), ["view", "preview"], "toggle: unchanged md → view + preview");
   assert.deepStrictEqual(D.paneToggleModes(false, "a.html"), ["view", "preview"], "toggle: unchanged html → view + preview");
   assert.deepStrictEqual(D.paneToggleModes(false, "a.txt"), [], "toggle: unchanged plain text → none (today's behavior)");
+  // The pane's general name header: it renders for ANY selected file, so the
+  // pane identifies itself in every mode (the name used to live in the diff
+  // view's head only). Called directly — the harness does not render child
+  // components inside FilesView.
+  const paneProps = { name: "a.txt", relPath: "a.txt", wsRoot: "/ws", openCapable: false,
+    status: null, base: "worktree", rev: null, changesetKnown: true,
+    readAt: () => Promise.resolve({}), fetchDiff: () => Promise.resolve({ patch: "" }),
+    readMermaid: () => Promise.resolve({ text: "" }), t: (k) => k,
+    navCollapsed: false, onToggleNav: () => {}, navId: "test-nav" };
+  const paneEl = D.PreviewPane(paneProps);
+  const heads = findEl(paneEl, (n) => n.p && n.p.className === "dswFiles_paneHead");
+  assert.strictEqual(heads.length, 1, "the selected file's name renders as the pane's general header");
+  assert.strictEqual(childText(heads[0]), "a.txt", "the pane header shows the file's name");
+  const emptyPane = D.PreviewPane({ ...paneProps, name: null });
+  assert.strictEqual(findEl(emptyPane, (n) => n.p && n.p.className === "dswFiles_paneHead").length, 0, "nothing selected → no pane header");
+  // The state pair's RESTORE control: in the view bar only while the nav is
+  // hidden. Absent while it's visible — the HIDE control then lives in the
+  // nav's own header, which FilesView (not PreviewPane) renders.
+  const navToggleEls = (el) => findEl(el, (n) => n.p && typeof n.p.className === "string" && n.p.className.includes("dswFiles_navToggle"));
+  assert.strictEqual(navToggleEls(paneEl).length, 0, "nav visible → no restore control in the view bar");
+  const paneNavHidden = D.PreviewPane({ ...paneProps, navCollapsed: true });
+  const restoreEls = navToggleEls(paneNavHidden);
+  assert.strictEqual(restoreEls.length, 1, "nav hidden → restore control in the view bar");
+  assert.strictEqual(restoreEls[0].p["aria-expanded"], "false", "restore control reports the nav collapsed");
+  assert.strictEqual(restoreEls[0].p["aria-controls"], "test-nav", "restore control names the nav region");
+  // The unified/split decision: a split side shows (paneW - 2×44px gutters)
+  // / 2 of the file's reference width, and the view is unified when that is
+  // LESS than 66% of it. The reference is FIXED at 100 columns (at the
+  // pane's font), so a file with long lines can't keep a wide pane unified.
+  assert.strictEqual(D.diffLayoutNarrow(1022, 459), false, "wide pane: split (467/side ≥ 66% of 459 = 303)");
+  assert.strictEqual(D.diffLayoutNarrow(694, 459), false, "just at the 66% boundary per side → split (NOT less than)");
+  assert.strictEqual(D.diffLayoutNarrow(693, 459), true, "just under the 66% boundary per side → unified");
+  assert.strictEqual(D.diffLayoutNarrow(200, 100), true, "narrow pane: unified (56/side < 66)");
+  assert.strictEqual(D.diffLayoutNarrow(0, 100), true, "unmeasurable pane → unified");
+  // Realistic 100-column reference at the 7.5px/col pane font (750px):
+  assert.strictEqual(D.diffLayoutNarrow(1078, 750), false, "exactly 66 columns per side → split");
+  assert.strictEqual(D.diffLayoutNarrow(1077, 750), true, "a column short of 66 per side → unified");
+  assert.strictEqual(D.diffLayoutNarrow(1422, 750), false, "1800-viewport fullscreen pane (≈1422): split");
+  assert.strictEqual(D.diffLayoutNarrow(1022, 750), true, "1400-viewport fullscreen pane (≈1022): unified");
+  assert.strictEqual(D.diffLayoutNarrow(630, 750), true, "the fixed 630px right column: unified");
 }
 
 // 12) previewContentFor, the render switch as a pure function (st,
@@ -744,7 +907,7 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
     ["files.ageHour", "{n}h", "{n} 小时"],
     ["files.ageDay", "{n}d", "{n} 天"],
     ["files.pathGone", "the folder no longer exists", "文件夹已不存在"],
-    ["files.showingRoot", "showing the workspace root", "已显示工作区根目录"],
+    ["files.truncated", "Too many entries, showing only some of them.", "条目太多，只显示了一部分。"],
     ["files.pdfFrameTitle", "PDF preview", "PDF 预览"],
     ["files.htmlFrameTitle", "HTML preview", "HTML 预览"],
     ["files.mermaidFrameTitle", "mermaid diagram", "mermaid 图表"],
@@ -1101,4 +1264,126 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
   assert.strictEqual(H.buildFileRef({ path: "p.ts", text: "" }), "@p.ts", "ref: empty text, no range → bare mention");
 }
 
-console.log("client: bundle + apply + inject-face + render + diff parser/view OK");
+// ---- Right-column takeover (the dsh sidebar-right replacement) ----
+{
+  // A 0.1.5+ host: re-apply against a ctx WITH the column's tab registry.
+  // The right-column face registers, and the conversation Files tab stays
+  // unregistered — one Files surface per host.
+  let registeredInColumnCtx = null;
+  const ctxColumn = {
+    ...ctx,
+    slots: {
+      inject: (slot, cb) => {
+        assert.ok(slot === "conversation.view" || slot === "sidebar.right.pane.tab", "slot: " + slot);
+        const r = cb();
+        return typeof r === "function" ? r : () => {};
+      },
+      register: (opts, comp) => {
+        if (opts.name === "conversation.view") registeredInColumnCtx = { opts, comp };
+        else if (opts.name === "sidebar.right.pane.tab") registeredRight = { opts, comp };
+        return () => {};
+      },
+    },
+    sidebarRightTabs: {
+      register: (def) => { tabDef = def; return () => {}; },
+    },
+  };
+  mod.apply(ctxColumn);
+  assert.strictEqual(registeredInColumnCtx, null, "0.1.5+ host: the conversation Files tab is NOT registered (the column is the surface)");
+
+  // The type registration: filestab claims the builtin's `files` kind on the
+  // extension band, recognizes file addresses, and keeps a SINGLE guide entry
+  // (defaultSeed's sole-entry rule: the column's first open seeds the files
+  // page directly, not a guide chain).
+  assert.ok(tabDef, "right-column type registered");
+  assert.strictEqual(tabDef.id, "filestab", "the id the body registers under");
+  assert.strictEqual(tabDef.kind, "files", "claims the builtin's kind");
+  assert.strictEqual(tabDef.priority, "extension", "the extension band outranks the builtin");
+  assert.deepStrictEqual(tabDef.patterns, ["dsh-resource://file/**"], "recognizes file addresses");
+  assert.strictEqual(tabDef.canOpen("dsh-resource://file/session/s1/a.txt"), true, "opens a session file address");
+  assert.strictEqual(tabDef.canOpen("dsh-resource://file/absolute/%2Ftmp/x"), false, "an absolute address is not this type's");
+  assert.strictEqual(tabDef.canOpen("sidebar://files"), false, "the page address is not a resource");
+  assert.strictEqual(tabDef.title("dsh-resource://file/session/s1/sub/a.txt"), "a.txt", "the resource chip shows the basename");
+  assert.strictEqual(tabDef.title("sidebar://files"), "view.workspace", "the page chip shows the Workspace label (fake t = identity)");
+  assert.strictEqual(tabDef.guide.length, 1, "a SINGLE guide entry → the column seeds on filestab");
+  assert.strictEqual(typeof tabDef.guide[0].title, "function", "the guide title is thunked (locale-flip safe)");
+  assert.strictEqual(typeof tabDef.guide[0].icon, "function", "the guide glyph is a component");
+
+  // The keyed body: registered under the definition's id, bound to the slot's
+  // session.
+  assert.ok(registeredRight, "right-column body registered");
+  assert.strictEqual(registeredRight.opts.key, "filestab", "the body sits under the definition's id");
+  const rface = registeredRight.opts.inject("sess-x");
+  assert.strictEqual(rface.sessionId, "sess-x", "the right face is bound to the slot's session");
+  assert.strictEqual(typeof rface.listDirectory, "function", "the right face carries the browse methods");
+
+  // parseFileAddress: the session-scoped shape, decoded segments, query
+  // suffix ignored, everything else is not this type's.
+  assert.deepStrictEqual(
+    H.parseFileAddress("dsh-resource://file/session/s1/sub%2Fx/a.txt"),
+    { scope: "session", sessionId: "s1", path: "sub/x/a.txt" }, "address: segments decode");
+  assert.deepStrictEqual(
+    H.parseFileAddress("dsh-resource://file/session/s1/a.txt?line=7"),
+    { scope: "session", sessionId: "s1", path: "a.txt" }, "address: the query suffix is ignored");
+  assert.strictEqual(H.parseFileAddress("dsh-resource://file/session/s1"), null, "address: a pathless tail is not a file");
+  assert.strictEqual(H.parseFileAddress("dsh-resource://file/absolute/%2Ftmp/x"), null, "address: absolute scope is not browsable here");
+  assert.strictEqual(H.parseFileAddress("sidebar://files"), null, "address: the page address is not a resource");
+  assert.strictEqual(H.fileAddressBasename("dsh-resource://file/session/s1/sub/a b.txt"), "a b.txt", "basename decodes its segment");
+
+  // The body's two lives: a resource open of THIS session's file renders the
+  // files view (restored from the nav cache, so the pane doesn't flash blank)
+  // and redirects (openTab files {path, line}, then close); the page address
+  // renders the files view and navigates in place.
+  const R = H.RightPaneBody;
+  assert.strictEqual(typeof R, "function", "the body is exposed for test");
+  const actions = [];
+  const mkTab = (address, params, revision) => ({
+    tab: {
+      contentId: address,
+      navigation: { address, params, revision },
+      signal: new AbortController().signal,
+      actions: {
+        openTab: (kind, opts) => { actions.push(["openTab", kind, opts]); },
+        openResource: (a, o) => { actions.push(["openResource", a, o]); },
+        close: () => { actions.push(["close"]); },
+      },
+    },
+  });
+  pendingEffects = [];
+  const frame = R({
+    useTabInfo: () => mkTab("dsh-resource://file/session/sess-x/sub/a.txt", { line: 7 }, 1),
+    sessionId: "sess-x", ...rface, t: (k) => k,
+  });
+  assert.ok(frame && typeof frame.t === "function", "the resource frame renders the files view (from the nav cache) while it redirects");
+  assert.deepStrictEqual(frame.p.openRequest, { path: "sub/a.txt", line: 7, revision: 1 }, "the frame derives its open request from the resource address");
+  for (const fn of pendingEffects) fn();
+  assert.deepStrictEqual(actions, [
+    ["openTab", "files", { params: { path: "sub/a.txt", line: 7 } }],
+    ["close"],
+  ], "the redirect: the page takes the open, the frame closes");
+
+  pendingEffects = [];
+  actions.length = 0;
+  const page = R({
+    useTabInfo: () => mkTab("sidebar://files", { path: "sub/a.txt", line: 7 }, 2),
+    sessionId: "sess-x", ...rface, t: (k) => k,
+  });
+  assert.ok(page && typeof page.t === "function", "the page renders the files view (a FilesView element)");
+  assert.deepStrictEqual(page.p.openRequest, { path: "sub/a.txt", line: 7, revision: 2 }, "the page receives the open request");
+  assert.deepStrictEqual(actions, [], "the page navigates in place (no redirect)");
+
+  // A resource open of ANOTHER session's file does not redirect (the face is
+  // bound to this slot's session) and does not leak a foreign request into
+  // the view (its params carry no path).
+  pendingEffects = [];
+  actions.length = 0;
+  const foreign = R({
+    useTabInfo: () => mkTab("dsh-resource://file/session/other/a.txt", { line: 3 }, 1),
+    sessionId: "sess-x", ...rface, t: (k) => k,
+  });
+  assert.ok(foreign && typeof foreign === "object", "a cross-session resource frame does not redirect");
+  for (const fn of pendingEffects) fn();
+  assert.deepStrictEqual(actions, [], "no redirect actions for another session's file");
+}
+
+console.log("client: bundle + apply + inject-face + render + diff parser/view + right-column OK");

@@ -12,6 +12,9 @@ await mkdir(join(ws, "sub"), { recursive: true });
 await mkdir(outside, { recursive: true });
 await writeFile(join(ws, "a.txt"), "hello");
 await writeFile(join(ws, "note.md"), "# hi\n");
+// fileshow-abs fixtures, OUTSIDE the workspace (its whole point): the text
+// file plus a markdown file for the classification check.
+await writeFile(join(outside, "notes.md"), "# outside\n\nabs path read\n");
 await writeFile(join(ws, "pic.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
 await writeFile(join(ws, "sub", "b.txt"), "world");
 await writeFile(join(outside, "secret.txt"), "top secret");
@@ -180,8 +183,6 @@ const call = async (endpoint, payload, rpcId = "rpc-" + Math.random().toString(1
 // `invalid_union` blob (regression: the git commit-review error path).
 { const r = await call("list", { sessionId: SESSION_ID, relPath: "../outside" });
   assert.ok(!r.ok && r.error.code === "workspace-invalid-path" && typeof r.error.details.path === "string", ".. escape → workspace-invalid-path: " + JSON.stringify(r)); n++; }
-{ const r = await call("list", { sessionId: SESSION_ID, relPath: "link" });
-  assert.ok(!r.ok && r.error.code === "workspace-invalid-path", "symlink escape → workspace-invalid-path: " + JSON.stringify(r)); n++; }
 { const r = await call("list", { sessionId: SESSION_ID, relPath: "/etc/passwd" });
   assert.ok(!r.ok && r.error.code === "workspace-invalid-path", "absolute → workspace-invalid-path: " + JSON.stringify(r)); n++; }
 { const r = await call("list", { sessionId: SESSION_ID, relPath: "a.txt" });
@@ -239,8 +240,6 @@ const call = async (endpoint, payload, rpcId = "rpc-" + Math.random().toString(1
   assert.ok(!r.ok && /not-found/.test(r.error.message), "missing → not-found: " + JSON.stringify(r)); n++; }
 { const r = await call("fileshow", { sessionId: SESSION_ID, relPath: "sub", rev: "worktree" });
   assert.ok(!r.ok && /not-a-file/.test(r.error.message), "directory → not-a-file: " + JSON.stringify(r)); n++; }
-{ const r = await call("fileshow", { sessionId: SESSION_ID, relPath: "link", rev: "worktree" });
-  assert.ok(!r.ok && r.error.code === "workspace-invalid-path", "symlink escape → workspace-invalid-path: " + JSON.stringify(r)); n++; }
 { const r = await call("fileshow", { sessionId: SESSION_ID, relPath: "../outside/secret.txt", rev: "worktree" });
   assert.ok(!r.ok && r.error.code === "workspace-invalid-path", ".. escape → workspace-invalid-path: " + JSON.stringify(r)); n++; }
 { const r = await call("fileshow", { sessionId: SESSION_ID, relPath: "/etc/passwd", rev: "worktree" });
@@ -250,6 +249,29 @@ const call = async (endpoint, payload, rpcId = "rpc-" + Math.random().toString(1
   assert.ok(!r.ok && r.error.code === "bad-request", "'commit' is not a fileshow rev: " + JSON.stringify(r)); n++; }
 { const r = await call("fileshow", { sessionId: SESSION_ID, relPath: "a.txt" });
   assert.ok(!r.ok && r.error.code === "bad-request", "missing rev → bad-request: " + JSON.stringify(r)); n++; }
+// fileshow-abs: a LIVE file by ABSOLUTE path, the External section's read.
+// The session is the scope (it must resolve); the path is the caller's and
+// is NOT containment-checked — reading outside the workspace is the point.
+{ const r = await call("fileshow-abs", { sessionId: SESSION_ID, path: join(outside, "secret.txt") });
+  assert.ok(r.ok && r.value.kind === "text" && r.value.text === "top secret", "outside file reads by absolute path: " + JSON.stringify(r)); n++; }
+{ const r = await call("fileshow-abs", { sessionId: SESSION_ID, path: join(outside, "notes.md") });
+  assert.ok(r.ok && r.value.kind === "text" && r.value.type === "text/markdown", "outside markdown classifies: " + JSON.stringify(r)); n++; }
+{ const r = await call("fileshow-abs", { sessionId: SESSION_ID, path: join(ws, "a.txt") });
+  assert.ok(r.ok && r.value.kind === "text" && r.value.text === "hello", "an inside file reads too (no containment either way): " + JSON.stringify(r)); n++; }
+{ const r = await call("fileshow-abs", { sessionId: SESSION_ID, path: join(outside, "nope.txt") });
+  assert.ok(!r.ok && /not-found/.test(r.error.message), "missing outside file → not-found: " + JSON.stringify(r)); n++; }
+{ const r = await call("fileshow-abs", { sessionId: SESSION_ID, path: outside });
+  assert.ok(!r.ok && /not-a-file/.test(r.error.message), "directory → not-a-file: " + JSON.stringify(r)); n++; }
+{ const r = await call("fileshow-abs", { sessionId: SESSION_ID, path: "relative.txt" });
+  assert.ok(!r.ok && r.error.code === "bad-request" && /absolute/.test(r.error.message), "relative path → bad-request: " + JSON.stringify(r)); n++; }
+{ const r = await call("fileshow-abs", { sessionId: SESSION_ID, path: "" });
+  assert.ok(!r.ok && r.error.code === "bad-request", "empty path → bad-request: " + JSON.stringify(r)); n++; }
+{ const r = await call("fileshow-abs", { sessionId: SESSION_ID, path: join(outside, "a\u0000b.txt") });
+  assert.ok(!r.ok && r.error.code === "bad-request", "NUL in path → bad-request: " + JSON.stringify(r)); n++; }
+{ const r = await call("fileshow-abs", { sessionId: "nope", path: join(outside, "secret.txt") });
+  assert.ok(!r.ok && r.error.code === "session-not-found", "unknown session → session-not-found: " + JSON.stringify(r)); n++; }
+{ const r = await call("fileshow-abs", { sessionId: COLD_ID, path: join(outside, "secret.txt") });
+  assert.ok(r.ok && r.value.kind === "text", "a COLD (persisted) session is a valid scope: " + JSON.stringify(r)); n++; }
 // finishFileShow (pure): the extension fallback fires only when sniff() is null,
 // so an unknown source extension renders as TEXT via the NUL heuristic (no NUL),
 // while a known-binary extension survives a missing signature (corrupt-file net).
@@ -280,4 +302,4 @@ const call = async (endpoint, payload, rpcId = "rpc-" + Math.random().toString(1
   assert.ok(!r.ok && r.error.code === "session-not-found", "no persistence service → session-not-found: " + JSON.stringify(r)); n++; }
 
 await rm(base, { recursive: true, force: true });
-console.log(`host: ${n} assertions passed (browse + cold-session resolution + fileshow worktree + mermaid bundle)`);
+console.log(`host: ${n} assertions passed (browse + cold-session resolution + fileshow worktree + fileshow-abs + mermaid bundle)`);

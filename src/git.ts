@@ -362,8 +362,8 @@ export type GitSnapshotListingResult =
  * READ-ONLY. A dir pathspec scopes to its subtree (boundary match). The
  * root lists the whole tree (the code raises the buffer cap to 16 MB. A
  * full tree is thousands of entries). Paths are repo-root-relative.
- * Containment via resolveInWorkspace (it walks to the deepest EXISTING
- * ancestor, so a history-only dir still resolves). The function returns
+ * Containment via resolveInWorkspace (lexical only, no filesystem access, so a
+ * history-only dir still resolves). The function returns
  * {error} shapes. The endpoint catches the WorkspacePathError from
  * resolveInWorkspace.
  */

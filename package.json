@@ -1,6 +1,6 @@
 {
   "name": "filestab",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Read-only, session-workspace-scoped Files tab for the dsh web GUI (generic connection.rpc host channel + web client).",
   "author": "American Jeff <gitjeff@americanjeff.com>",
   "license": "MIT",
@@ -34,7 +34,7 @@
     "dsh.cordis.yml"
   ],
   "scripts": {
-    "build": "tsc && tsc -p tsconfig.client.json && tsdown && node scripts/copy-mermaid.mjs",
+    "build": "node scripts/inject-css.mjs && tsc && tsc -p tsconfig.client.json && tsdown && node scripts/copy-mermaid.mjs",
     "prepack": "npm run build",
     "test": "npm run build && node test/containment.test.mjs && node test/magic.test.mjs && node test/filesystem.test.mjs && node test/host.test.mjs && node test/jj.test.mjs && node test/git.test.mjs && node test/client.test.mjs",
     "e2e": "node test/e2e/e2e.test.mjs"

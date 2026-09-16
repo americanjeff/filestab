@@ -47,13 +47,14 @@ const VARIANTS = [
 async function readNavWidth(page) {
   return page.evaluate(() => {
     const el = document.querySelector(".dswFiles_body");
-    const w = parseFloat(getComputedStyle(el).getPropertyValue("--filez-left"));
+    const w = parseFloat(getComputedStyle(el).getPropertyValue("--filez-nav"));
     return Number.isFinite(w) ? w : 340;
   });
 }
 
 // Drag the divider the app's way (pointerdown/move/up on .dswFiles_divider);
-// the handler settles leftW state on pointerup.
+// the handler settles navW state on pointerup. The nav column is rightmost,
+// so growing it drags the divider LEFT.
 async function setNavWidth(page, target) {
   const cur = await readNavWidth(page);
   if (Math.abs(cur - target) < 1) return cur;
@@ -63,7 +64,7 @@ async function setNavWidth(page, target) {
   const x0 = box.x + box.width / 2;
   await page.mouse.move(x0, y);
   await page.mouse.down();
-  await page.mouse.move(x0 + (target - cur), y, { steps: 8 });
+  await page.mouse.move(x0 + (cur - target), y, { steps: 8 });
   await page.mouse.up();
   await page.waitForTimeout(400);
   const after = await readNavWidth(page);

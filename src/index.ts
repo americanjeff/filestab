@@ -3,8 +3,9 @@
 // other /api call.
 // Every read stays inside the workspace (the session tether). The client
 // sends sessionId. The code re-resolves the workspace server-side and
-// containment-checks every relPath (src/containment.ts), including symlink
-// escapes.
+// containment-checks every relPath (src/containment.ts) lexically — it
+// rejects NUL bytes, absolute paths, and `..` climbing above the root.
+// Symlink targets are deliberately not re-resolved (see src/containment.ts).
 // The code ships NO HTTP file route. File bytes travel over the RPC as
 // text or base64. The browser never loads a workspace file as a
 // same-origin document (no served HTML/SVG to execute, no whole-FS read
@@ -19,7 +20,7 @@ import { listDirectory } from "./filesystem.js";
 import { resolveInWorkspace } from "./containment.js";
 import { jj, jjWorkspaceStatus, jjCommitChanges, jjEscapePath, type ChangeEntry, type JjWorkspaceStatusResult } from "./jj.js";
 import { git, gitWorkspaceStatus, gitUntrackedDiff, gitSnapshotListing, gitFileShow, gitCommitChanges, gitLiteralPath, isBadRevision, parseNameStatus, type GitWorkspaceStatusResult } from "./git.js";
-import { snapshotListing, fileShow, worktreeFileShow, REV_RE, type FileShowValue } from "./snapshot.js";
+import { snapshotListing, fileShow, worktreeFileShow, absoluteFileShow, REV_RE, type FileShowValue } from "./snapshot.js";
 import type { ListingValue } from "./filesystem.js";
 
 const name = "filestab";
@@ -258,7 +259,7 @@ function envelopeError(error: { code?: string; message?: string; details?: Recor
     case "session-not-found":
       return { ok: false, error: { code: "session-not-found", message, details: { sessionId: String(payload?.sessionId ?? "") } } };
     case "forbidden":
-      return { ok: false, error: { code: "workspace-invalid-path", message, details: { path: String(payload?.relPath ?? "") } } };
+      return { ok: false, error: { code: "workspace-invalid-path", message, details: { path: String(payload?.relPath ?? payload?.path ?? "") } } };
     default:
       // VCS/git/jj backend codes, no-workspace, io-error → the catch-all (the
       // original code rides in the message for debugging).
@@ -281,6 +282,11 @@ function envelopeError(error: { code?: string; message?: string; details?: Recor
 //   fileshow { sessionId, relPath, rev } → { kind: "text"|"binary", … }, the
 //     file's bytes for the preview. rev "worktree" = the live on-disk file
 //     (plain contained read, no VCS). A change/commit id = that revision.
+//   fileshow-abs { sessionId, path } → { kind: "text"|"binary", … }, a LIVE
+//     file by ABSOLUTE path OUTSIDE the workspace (the External section).
+//     The session is the scope (it must resolve); the path is absolute and
+//     is NOT containment-checked — the caller is the session owner. Same
+//     cap and classification as the worktree fileshow.
 //   Errors   map onto the client's CLOSED rpcErrorSchema code set
 //     (envelopeError). Plugin-specific codes ride in `message`.
 function makeBrowseHandler(ctx: Context): (endpoint: string, payload: BrowsePayload | null | undefined) => Promise<RpcResult> {
@@ -451,31 +457,54 @@ function makeBrowseHandler(ctx: Context): (endpoint: string, payload: BrowsePayl
         // attaches the file's BYTES at the rev AND its parent. The client
         // renders old|new for a displayable image/PDF. A side absent (new/
         // deleted, or a root with no parent) → null. Over-cap or
-        // non-displayable → no `data` (the card). `noBinary: true` skips the
-        // reads (the bytes are history-stable. The client keeps its first
-        // fetch's copy). Change-id bases only: "worktree"/"commit" have no
-        // stable parent read.
-        // A rename is the marker-less binary: jj's --git output emits only
-        // the rename lines (no "Binary files" line), and the two sides live
-        // at DIFFERENT paths. The gate accepts the rename lines, and each
-        // side reads under its own name (`rename to` at the rev, `rename
-        // from` at the parent).
+        // non-displayable → no `data` (the card). `noBinary: true` skips
+        // the reads (committed bytes are history-stable; the client keeps
+        // its first fetch's copy and drops it when the patch changes, so a
+        // live worktree edit re-fetches on the next poll).
+        // Side resolution per base: the worktree base is @ vs @- (jj) /
+        // HEAD vs disk (git) — its NEW side is the LIVE file, read on disk
+        // like the view mode (and its untracked files have no git object
+        // at all); the commit base is @- vs @-- (jj) / HEAD vs HEAD~1
+        // (git). A missing parent read fails cleanly → null side, the
+        // "(none)" slot, same as a new file's missing old side.
+        // A rename is the marker-less binary: the two sides live at
+        // DIFFERENT paths, so each side reads under its own name (`rename
+        // to` on the new side, `rename from` on the old). Under a single
+        // pathspec git decomposes a rename into a new/deleted file (the
+        // pathspec hides the other half of the pair), so a decomposed
+        // add/delete is recovered from a -M name-status of the same range.
         let binary: { new: FileShowValue | null; old: FileShowValue | null } | undefined;
-        if (p.noBinary !== true && base !== "worktree" && base !== "commit" && REV_RE.test(base)) {
-          let isNew = patch.indexOf("new file mode") >= 0;
-          let isDeleted = patch.indexOf("deleted file mode") >= 0;
+        if (p.noBinary !== true) {
+          // The git diff markers are matched LINE-BASED, anchored to the line
+          // start — never as substrings of the whole patch. A substring match
+          // false-positives when the file being diffed is source that itself
+          // contains these strings (this very file's marker-scan does). The
+          // diff BODY prefixes content lines with space/+/−, so a real marker
+          // sits at column 0 and an embedded string never does.
+          let isNew = false;
+          let isDeleted = false;
+          let hasMarker = false;
           let renameFrom: string | null = null;
           let renameTo: string | null = null;
           for (const line of patch.split("\n")) {
-            if (line.startsWith("rename from ")) renameFrom = line.slice(12);
+            if (line.startsWith("new file mode")) isNew = true;
+            else if (line.startsWith("deleted file mode")) isDeleted = true;
+            else if (line.startsWith("Binary files ")) hasMarker = true;
+            else if (line.startsWith("rename from ")) renameFrom = line.slice(12);
             else if (line.startsWith("rename to ")) renameTo = line.slice(10);
           }
           if (backend === "git" && renameTo === null && (isNew || isDeleted)) {
-            // git show under a single pathspec decomposes a rename into a
-            // new/deleted file; recover the pair from the commit's -M
-            // name-status so the old side reads under the OLD name. A
-            // rename is neither an add nor a delete: both sides exist.
-            const ns = await git(ws.root, ["show", "--format=", "-M", "--name-status", base]);
+            // Under a single pathspec, git decomposes a rename into a
+            // new/deleted file (the pathspec hides the other half of the
+            // pair, `git show` AND `git diff` alike); recover the pair from
+            // a -M name-status of the same range so the old side reads
+            // under the OLD name. A rename is neither an add nor a delete:
+            // both sides exist.
+            const ns = await git(ws.root, base === "worktree"
+              ? ["diff", "-M", "--name-status", "HEAD"]
+              : base === "commit"
+                ? ["diff", "-M", "--name-status", "HEAD~1", "HEAD"]
+                : ["show", "--format=", "-M", "--name-status", base]);
             if (ns.ok) {
               for (const e of parseNameStatus(ns.value)) {
                 if (e.status === "R" && (e.path === relPath || e.oldPath === relPath)) {
@@ -488,25 +517,33 @@ function makeBrowseHandler(ctx: Context): (endpoint: string, payload: BrowsePayl
               }
             }
           }
-          const hasMarker = patch.indexOf("Binary files ") >= 0;
           if (hasMarker || renameTo !== null) {
-            const side = async (r: string, path: string): Promise<FileShowValue | null> => {
-              const v = backend === "git"
-                ? await gitFileShow(ws.root, r, path)
-                : await fileShow(ws.root, r, path);
+            // null rev = the live on-disk read (the worktree base's new side).
+            const [newRev, oldRev]: [string | null, string | null] = backend === "git"
+              ? base === "worktree" ? [null, "HEAD"]
+                : base === "commit" ? ["HEAD", "HEAD~1"]
+                : [base, base + "^"]
+              : base === "worktree" ? [null, "@-"]
+                : base === "commit" ? ["@-", "@--"]
+                : [base, base + "-"];
+            const side = async (r: string | null, path: string): Promise<FileShowValue | null> => {
+              const v = r === null
+                ? await worktreeFileShow(ws.root, path)
+                : backend === "git"
+                  ? await gitFileShow(ws.root, r, path)
+                  : await fileShow(ws.root, r, path);
               return v && "kind" in v && v.kind === "binary" ? v : null;
             };
-            // Parent read per backend: jj's `<id>-` operator, git's `<sha>^`
-            // (a root commit's parent read fails cleanly → null side, the
-            // "(none)" slot, same as a new file's missing old side).
             const [nw, oldv] = await Promise.all([
-              isDeleted ? Promise.resolve(null) : side(base, renameTo ?? relPath),
-              isNew ? Promise.resolve(null) : side(backend === "git" ? `${base}^` : base + "-", renameFrom ?? relPath),
+              isDeleted ? Promise.resolve(null) : side(newRev, renameTo ?? relPath),
+              isNew ? Promise.resolve(null) : side(oldRev, renameFrom ?? relPath),
             ]);
-            // A marker-less rename attaches only when some side resolved:
-            // an all-null block would make the client show a binary card for
-            // a text-file rename. The marker path stays authoritative.
-            if (hasMarker || nw || oldv) binary = { new: nw, old: oldv };
+            // Attach only when some side actually resolved to a binary value:
+            // an all-null block would make the client show a binary card for a
+            // text file (a marker-less rename, or a false marker). A real
+            // binary always has at least one side (a new file's new side, a
+            // deleted file's old side, or both for a change).
+            if (nw || oldv) binary = { new: nw, old: oldv };
           }
         }
         return { ok: true, value: { patch, truncated, base, ...(binary ? { binary } : {}) } };
@@ -537,6 +574,26 @@ function makeBrowseHandler(ctx: Context): (endpoint: string, payload: BrowsePayl
         const r = backend === "git"
           ? await gitFileShow(ws.root, p.rev, relPath)
           : await fileShow(ws.root, p.rev, relPath);
+        if ("error" in r) return { ok: false, error: { code: r.error, message: r.message } };
+        return { ok: true, value: r };
+      } catch (error) {
+        const e = error as { name?: string; message?: string } | null;
+        if (e?.name === "WorkspacePathError")
+          return { ok: false, error: { code: "forbidden", message: e.message ?? "" } };
+        return { ok: false, error: { code: "io-error", message: e?.message ?? String(error) } };
+      }
+    }
+    if (endpoint === "fileshow-abs") {
+      try {
+        // The session is the scope (the same gate every other endpoint
+        // applies). The path is the caller's absolute one: absoluteFileShow
+        // validates absoluteness, and there is deliberately NO containment
+        // here — this endpoint exists to read outside the workspace.
+        const ws = await resolveWorkspace(ctx, p.sessionId);
+        if ("error" in ws) return { ok: false, error: ws.error };
+        if (typeof p.path !== "string" || p.path === "")
+          return { ok: false, error: { code: "bad-request", message: "path must be a non-empty string" } };
+        const r = await absoluteFileShow(p.path);
         if ("error" in r) return { ok: false, error: { code: r.error, message: r.message } };
         return { ok: true, value: r };
       } catch (error) {

@@ -438,6 +438,27 @@ const PIC2 = (await jjWorkspaceStatus(ws, { force: true })).commits[0].id;
   ok(r2.ok && r2.value.binary === undefined, "noBinary skips the rename's byte reads too");
 }
 
+// The KEYWORD bases attach bytes too: the worktree base is the "current
+// changes" review (jj diff = @ vs @- — its new side is the LIVE disk read),
+// the commit base the last commit's own diff (diff -r @-). Without these,
+// the most common review (the uncommitted worktree) shows only the binary
+// card for images.
+{
+  await writeFile(join(ws, "pic4.png"), PNG1); // live edit: both sides differ
+  const rw = await call("diff", { sessionId: "sess-1", relPath: "pic4.png", base: "worktree" });
+  ok(rw.ok && rw.value.binary && rw.value.binary.old && rw.value.binary.new, "worktree-base binary diff carries both sides: " + JSON.stringify(rw?.value && Object.keys(rw.value)));
+  assert.strictEqual(Buffer.from(rw.value.binary.old.data, "base64").toString("hex"), PNG2.toString("hex"), "worktree base: OLD side = @- (the committed pic4)");
+  assert.strictEqual(Buffer.from(rw.value.binary.new.data, "base64").toString("hex"), PNG1.toString("hex"), "worktree base: NEW side = the LIVE worktree bytes");
+  // @- is the RENAME commit (marker-less): asked under the NEW name the
+  // sides read pic4.png at @- and pic3.png at @--.
+  const rc = await call("diff", { sessionId: "sess-1", relPath: "pic4.png", base: "commit" });
+  ok(rc.ok && rc.value.binary && rc.value.binary.old && rc.value.binary.new, "commit-base (the @- rename commit) carries both sides: " + JSON.stringify(rc?.value && Object.keys(rc.value)));
+  assert.strictEqual(Buffer.from(rc.value.binary.old.data, "base64").toString("hex"), PNG2.toString("hex"), "commit base: OLD side = @-- under rename from (pic3.png)");
+  assert.strictEqual(Buffer.from(rc.value.binary.new.data, "base64").toString("hex"), PNG2.toString("hex"), "commit base: NEW side = @- under rename to (pic4.png)");
+  const rn = await call("diff", { sessionId: "sess-1", relPath: "pic4.png", base: "worktree", noBinary: true });
+  ok(rn.ok && rn.value.binary === undefined, "noBinary skips the byte reads at the worktree base too");
+}
+
 // A dash-prefixed path must follow a `--` separator in jj file list/show, or jj parses it as a flag.
 {
   await writeFile(join(ws, "--dash.txt"), "dash\n");
@@ -511,6 +532,40 @@ const PIC2 = (await jjWorkspaceStatus(ws, { force: true })).commits[0].id;
   const MM = stM.commits.find((c) => c.description === "mm").id;
   const r = await jj(m, ["diff", "-r", MM, "--git"]);
   ok(r.ok && r.value === "", "clean merge's own diff is EMPTY (jj log -p semantics): " + JSON.stringify(r.ok ? r.value : r.code));
+}
+
+// Regression (false-positive binary marker): a text file whose DIFF BODY
+// contains the literal git marker strings as FILE CONTENT must not be
+// classified as binary. The server's marker scan is line-based, anchored to
+// column 0; the diff body prefixes content lines with space/+/−, so an
+// embedded string never matches. (filestab's own src/index.ts trips this:
+// its marker-scan code contains the strings, so diffing it attached an
+// all-null binary block and the client rendered "binary file (content
+// differs)".)
+{
+  const mws = join(base, "marker-ws");
+  await runJj(base, ["git", "init", mws]);
+  await writeFile(join(mws, "m.ts"), "export const a = 1;\n");
+  ok((await runJj(mws, ["commit", "-m", "base"])).code === 0, "marker baseline");
+  // Add a line carrying all three marker STRINGS inside a literal: they sit
+  // mid-line (after the + prefix), never at column 0.
+  await writeFile(join(mws, "m.ts"), 'export const a = 1;\nexport const m = "Binary files a/x and b/y differ | new file mode 100644 | deleted file mode 100644";\n');
+  const mkCtx = {
+    get(name) {
+      if (name === "sessions") return { get: (id) => ({ id, header: { cwd: mws } }) };
+      if (name === "sandboxPolicy") return { resolve: ({ session }) => ({ mode: "workspace-write", workspaceRoot: session?.header?.cwd }) };
+      return undefined;
+    },
+    on() {},
+    effect: (fn) => { fn(); },
+    logger: { info() {}, error() {} },
+  };
+  const mkCall = (endpoint, payload) => __test.makeBrowseHandler(mkCtx)(endpoint, payload);
+  const r = await mkCall("diff", { sessionId: "smk", relPath: "m.ts", base: "worktree" });
+  ok(r.ok, "marker-file diff ok: " + JSON.stringify(r?.error ?? null));
+  ok(r.value.patch.startsWith("diff --git"), "marker-file patch is a real text diff");
+  ok(r.value.patch.indexOf("Binary files ") >= 0 && r.value.patch.indexOf("new file mode") >= 0, "sanity: the marker substrings ARE in the patch body (the old substring scan would have fired)");
+  ok(r.value.binary === undefined, "NO binary block for a text file whose content contains the marker strings (false-positive regression)");
 }
 
 await rm(base, { recursive: true, force: true });
