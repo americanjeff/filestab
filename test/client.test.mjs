@@ -143,35 +143,41 @@ assert.ok(H && typeof H.renderMarkdown === "function", "markdown renderer expose
 }
 // renderMarkdown is markdown-it (html:false, linkify + fuzzyLink, breaks:false)
 // plus the task-lists plugin; these pin its exact output for the invariants.
-assert.strictEqual(H.renderMarkdown("# Hi\n\nA **bold** para."), "<h1>Hi</h1>\n<p>A <strong>bold</strong> para.</p>\n", "md: heading + bold");
-assert.strictEqual(H.renderMarkdown("- one\n- two"), "<ul>\n<li>one</li>\n<li>two</li>\n</ul>\n", "md: unordered list");
+assert.strictEqual(H.renderMarkdown("# Hi\n\nA **bold** para."), "<h1 data-line-start=\"1\">Hi</h1>\n<p data-line-start=\"3\">A <strong>bold</strong> para.</p>\n", "md: heading + bold (line-stamped)");
+assert.strictEqual(H.renderMarkdown("- one\n- two"), "<ul>\n<li data-line-start=\"1\">one</li>\n<li data-line-start=\"2\">two</li>\n</ul>\n", "md: tight list stamps the <li> (the renderer drops the paragraph)");
 assert.ok(H.renderMarkdown("> a quote").includes("<blockquote>"), "md: blockquote");
-assert.strictEqual(H.renderMarkdown("```js\ncode()\n```"), "<pre><code class=\"language-js\"><span class=\"hljs-title function_\">code</span>()\n</code></pre>\n", "md: fenced code, highlighted");
+assert.strictEqual(H.renderMarkdown("```js\ncode()\n```"), "<pre><code data-line-start=\"2\" class=\"language-js\"><span class=\"hljs-title function_\">code</span>()\n</code></pre>\n", "md: fenced code, highlighted (stamp = first CONTENT line, the delimiter takes the first)");
 assert.ok(H.renderMarkdown("```js\nfunction double(x) {\n  return x * 2; // a comment\n}\n```").includes('<span class="hljs-keyword">function</span>'), "md: tagged fence gets token spans");
-assert.strictEqual(H.renderMarkdown("```\nplain fenced line one\nplain fenced line two\n```"), "<pre><code>plain fenced line one\nplain fenced line two\n</code></pre>\n", "md: untagged fence stays plain (auto-detect below threshold)");
+assert.strictEqual(H.renderMarkdown("```\nplain fenced line one\nplain fenced line two\n```"), "<pre><code data-line-start=\"2\">plain fenced line one\nplain fenced line two\n</code></pre>\n", "md: untagged fence stays plain (auto-detect below threshold)");
 assert.ok(H.renderMarkdown("```python\ndef double(x):\n    return x * 2\n```").includes('<span class="hljs-keyword">def</span>'), "md: python fence highlighted");
 assert.ok(H.renderMarkdown("plain <script>x</script> text").includes("&lt;script&gt;"), "md: raw html escaped (html:false, safe by construction)");
 assert.ok(!H.renderMarkdown("[x](javascript:alert(1))").includes("<a "), "md: javascript: link dropped");
 assert.ok(H.renderMarkdown("[x](https://a.b)").includes('<a href="https://a.b" target="_blank" rel="noopener noreferrer">'), "md: safe link kept, opens in a new tab (BUG-012: a bare <a> click would navigate the dsh session's tab)");
-assert.strictEqual(H.renderMarkdown("line one\nline two"), "<p>line one\nline two</p>\n", "md: soft break stays a soft break (GitHub file-view behavior, renders as space)");
-assert.strictEqual(H.renderMarkdown("line one  \nline two"), "<p>line one<br>\nline two</p>\n", "md: hard break (two trailing spaces) -> <br>");
-assert.strictEqual(H.renderMarkdown("line one\\\nline two"), "<p>line one<br>\nline two</p>\n", "md: hard break (backslash) -> <br>");
-assert.strictEqual(H.renderMarkdown("| A | B |\n|---|---:|\n| 1 | 2 |"), "<table>\n<thead>\n<tr>\n<th>A</th>\n<th style=\"text-align:right\">B</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td>1</td>\n<td style=\"text-align:right\">2</td>\n</tr>\n</tbody>\n</table>\n", "md: gfm table + right alignment");
-assert.strictEqual(H.renderMarkdown("| Pipe |\n|------|\n| a \\| b \\| c |"), "<table>\n<thead>\n<tr>\n<th>Pipe</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td>a | b | c</td>\n</tr>\n</tbody>\n</table>\n", "md: one-column table, escaped pipes become literal");
+// The \n / <br> are what the ref resolver's line counting walks, so they
+// must stay literal in the text (a soft break is a source line break).
+assert.strictEqual(H.renderMarkdown("line one\nline two"), "<p data-line-start=\"1\">line one\nline two</p>\n", "md: soft break stays a soft break (GitHub file-view behavior, renders as space)");
+assert.strictEqual(H.renderMarkdown("line one  \nline two"), "<p data-line-start=\"1\">line one<br>\nline two</p>\n", "md: hard break (two trailing spaces) -> <br>");
+assert.strictEqual(H.renderMarkdown("line one\\\nline two"), "<p data-line-start=\"1\">line one<br>\nline two</p>\n", "md: hard break (backslash) -> <br>");
+assert.strictEqual(H.renderMarkdown("| A | B |\n|---|---:|\n| 1 | 2 |"), "<table>\n<thead>\n<tr data-line-start=\"1\">\n<th>A</th>\n<th style=\"text-align:right\">B</th>\n</tr>\n</thead>\n<tbody>\n<tr data-line-start=\"3\">\n<td>1</td>\n<td style=\"text-align:right\">2</td>\n</tr>\n</tbody>\n</table>\n", "md: gfm table + right alignment (rows stamped, a row is one source line)");
+assert.strictEqual(H.renderMarkdown("| Pipe |\n|------|\n| a \\| b \\| c |"), "<table>\n<thead>\n<tr data-line-start=\"1\">\n<th>Pipe</th>\n</tr>\n</thead>\n<tbody>\n<tr data-line-start=\"3\">\n<td>a | b | c</td>\n</tr>\n</tbody>\n</table>\n", "md: one-column table, escaped pipes become literal");
 assert.ok(H.renderMarkdown("| L | C | R |\n|:--|:-:|--:|\n| `x` | **b** | [t](https://e.com) |").includes('<td style="text-align:center"><strong>b</strong></td>\n<td style="text-align:right"><a href="https://e.com" target="_blank" rel="noopener noreferrer">t</a></td>'), "md: inline markdown in table cells");
-assert.strictEqual(H.renderMarkdown("Setext level 2\n-------------"), "<h2>Setext level 2</h2>\n", "md: setext heading (pipe-less line is not a table)");
-assert.ok(H.renderMarkdown("| A |\n|---|\n| 1 |\n\ntail para").includes("</table>\n<p>tail para</p>"), "md: blank line ends the table");
+assert.strictEqual(H.renderMarkdown("Setext level 2\n-------------"), "<h2 data-line-start=\"1\">Setext level 2</h2>\n", "md: setext heading (pipe-less line is not a table)");
+assert.ok(H.renderMarkdown("| A |\n|---|\n| 1 |\n\ntail para").includes("</table>\n<p data-line-start=\"5\">tail para</p>"), "md: blank line ends the table");
 assert.ok(H.renderMarkdown("| A |\n|---|\n| 1 |\nplain continuation").includes("<td>plain continuation</td>"), "md: pipe-less line continues the table as a one-cell row");
-assert.strictEqual(H.renderMarkdown("- [x] done\n- [ ] todo"), "<ul class=\"contains-task-list\">\n<li class=\"task-list-item\"><input class=\"task-list-item-checkbox\" checked=\"\" disabled=\"\" type=\"checkbox\"> done</li>\n<li class=\"task-list-item\"><input class=\"task-list-item-checkbox\" disabled=\"\" type=\"checkbox\"> todo</li>\n</ul>\n", "md: gfm task list (disabled checkboxes)");
-assert.strictEqual(H.renderMarkdown("a ~~strike~~ b"), "<p>a <s>strike</s> b</p>\n", "md: strikethrough");
-assert.strictEqual(H.renderMarkdown("Title\n==="), "<h1>Title</h1>\n", "md: setext h1");
+assert.strictEqual(H.renderMarkdown("- [x] done\n- [ ] todo"), "<ul class=\"contains-task-list\">\n<li class=\"task-list-item\" data-line-start=\"1\"><input class=\"task-list-item-checkbox\" checked=\"\" disabled=\"\" type=\"checkbox\"> done</li>\n<li class=\"task-list-item\" data-line-start=\"2\"><input class=\"task-list-item-checkbox\" disabled=\"\" type=\"checkbox\"> todo</li>\n</ul>\n", "md: gfm task list (disabled checkboxes, tight items stamped)");
+assert.strictEqual(H.renderMarkdown("a ~~strike~~ b"), "<p data-line-start=\"1\">a <s>strike</s> b</p>\n", "md: strikethrough");
+assert.strictEqual(H.renderMarkdown("Title\n==="), "<h1 data-line-start=\"1\">Title</h1>\n", "md: setext h1");
 assert.ok(H.renderMarkdown("9. first\n10. second").includes('<ol start="9">'), "md: ordered list start number");
-assert.ok(H.renderMarkdown("    code()").includes("<pre><code>code()"), "md: indented code block");
+assert.ok(H.renderMarkdown("    code()").includes("<pre data-line-start=\"1\"><code>code()"), "md: indented code block (stamped)");
 assert.ok(H.renderMarkdown("[ref][1]\n\n[1]: https://x.dev").includes('<a href="https://x.dev" target="_blank" rel="noopener noreferrer">ref</a>'), "md: reference link resolved, new tab");
 assert.ok(H.renderMarkdown("see https://example.com now").includes('<a href="https://example.com" target="_blank" rel="noopener noreferrer">https://example.com</a>'), "md: autolink (scheme), new tab");
 assert.ok(H.renderMarkdown("GFM www form: www.example.com/plain").includes('<a href="http://www.example.com/plain" target="_blank" rel="noopener noreferrer">www.example.com/plain</a>'), "md: autolink (www form, fuzzyLink), new tab");
-assert.ok(H.renderMarkdown("- a\n  - b\n- c").includes("<li>a\n<ul>\n<li>b</li>\n</ul>\n</li>"), "md: nested list");
-assert.strictEqual(H.renderMarkdown("\\*not italic\\*"), "<p>*not italic*</p>\n", "md: backslash escape");
+// A tight item is stamped only when it is exactly one paragraph: the
+// multi-block outer li stays unstamped (its textContent would skip the blank
+// lines between its blocks, breaking the line count) — the ref there falls
+// back to the snippet anchor.
+assert.ok(H.renderMarkdown("- a\n  - b\n- c").includes("<li>a\n<ul>\n<li data-line-start=\"2\">b</li>\n</ul>\n</li>"), "md: nested list (outer multi-block li unstamped, inner stamped)");
+assert.strictEqual(H.renderMarkdown("\\*not italic\\*"), "<p data-line-start=\"1\">*not italic*</p>\n", "md: backslash escape");
 assert.strictEqual(H.renderMarkdown("- - -"), "<hr>\n", "md: spaced dashes hr");
 assert.strictEqual(H.formatBytes(512), "512 B", "bytes: B");
 assert.strictEqual(H.formatBytes(2048), "2 KB", "bytes: KB");
@@ -342,6 +348,10 @@ assert.deepStrictEqual(H.paneToggleModes(false, "notes.md"), ["view", "preview"]
 assert.deepStrictEqual(H.paneToggleModes(true, "notes.md"), ["diff", "view", "preview"], "a diffable markdown offers diff + view + preview");
 assert.strictEqual(H.resolvePaneMode("auto", false, "notes.md"), "preview", "auto for a non-diffable markdown → preview (never diff)");
 assert.strictEqual(H.resolvePaneMode("auto", false, "app.log"), "view", "auto for a non-diffable plain file → view");
+assert.strictEqual(H.resolvePaneMode("auto", true, "app.log"), "view", "auto for a DIFFABLE plain file → view (content is the default, not the diff)");
+assert.strictEqual(H.resolvePaneMode("auto", true, "notes.md"), "preview", "auto for a diffable markdown → preview (rendered content, not the diff)");
+assert.strictEqual(H.resolvePaneMode("auto", true, "gone.txt", true), "diff", "auto for a deleted (content-less) diffable file → the diff is its only view");
+assert.strictEqual(H.resolvePaneMode("auto", false, "gone.txt", true), "view", "noContent alone never means diff (nothing to diff)");
 assert.strictEqual(H.resolvePaneMode("diff", false, "notes.md"), "view", "an explicit diff on a non-diffable file falls back to view");
 // Nothing pinned: the band is absent (zero space) and the footer's manual
 // "Open file…" affordance is the only entry point.
@@ -688,9 +698,13 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
 
 // 11) Presentation modes (M6): diff | view (raw) | preview (rendered).
 // Only markdown/HTML have a distinct rendering, the toggle and the auto
-// default follow from that; markdown renders by default (our own
-// escape-first renderer, no scripts), HTML defaults to raw (rendering
-// executes the document's scripts, explicit opt-in).
+// default follow from that; a fresh selection opens as CONTENT, never as a
+// diff: markdown renders by default (our own escape-first renderer, no
+// scripts), HTML defaults to raw (rendering executes the document's
+// scripts, explicit opt-in), everything else is raw view. The single
+// exception is a content-less (deleted) diffable file: the diff is its only
+// view. An explicit diff (the soft-sticky preference or a pinned pick) is
+// honored; it falls back to view when the file is not diffable.
 {
   assert.strictEqual(D.renderKindOf("a.md"), "markdown", "kind: .md");
   assert.strictEqual(D.renderKindOf("a.markdown"), "markdown", "kind: .markdown");
@@ -699,13 +713,33 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
   assert.strictEqual(D.renderKindOf("a.txt"), null, "kind: text → null");
   assert.strictEqual(D.renderKindOf("a.md.bak"), null, "kind: suffix must be the extension");
   assert.strictEqual(D.renderKindOf(""), null, "kind: empty → null");
-  assert.strictEqual(D.resolvePaneMode("auto", true, "a.txt"), "diff", "auto: diffable → diff");
+  assert.strictEqual(D.resolvePaneMode("auto", true, "a.txt"), "view", "auto: diffable text → view (content is the default, never diff)");
+  assert.strictEqual(D.resolvePaneMode("auto", true, "a.md"), "preview", "auto: diffable md → rendered content by default");
+  assert.strictEqual(D.resolvePaneMode("auto", true, "a.html"), "view", "auto: diffable html → RAW (scripts = opt-in)");
+  assert.strictEqual(D.resolvePaneMode("auto", true, "a.txt", true), "diff", "auto: a deleted (content-less) diffable file → the diff is its only view");
   assert.strictEqual(D.resolvePaneMode("auto", false, "a.md"), "preview", "auto: unchanged md → rendered by default");
   assert.strictEqual(D.resolvePaneMode("auto", false, "a.html"), "view", "auto: unchanged html → RAW (scripts = opt-in)");
   assert.strictEqual(D.resolvePaneMode("auto", false, "a.txt"), "view", "auto: unchanged text → view");
+  assert.strictEqual(D.resolvePaneMode("diff", true, "a.md"), "diff", "pinned diff on a diffable file → diff (the soft-sticky case)");
   assert.strictEqual(D.resolvePaneMode("diff", false, "a.md"), "view", "pinned diff that stops being diffable → view");
   assert.strictEqual(D.resolvePaneMode("preview", false, "a.html"), "preview", "pinned preview sticks");
-  assert.strictEqual(D.resolvePaneMode("view", true, "a.md"), "view", "pinned view beats the diff default");
+  assert.strictEqual(D.resolvePaneMode("view", true, "a.md"), "view", "pinned view beats the diff preference");
+  // The soft-sticky diff preference: session-scoped, in-memory, armed by an
+  // explicit Diff pick and disarmed by an explicit View/Preview pick, a
+  // session change, or the surface closing (the last is the FilesView
+  // unmount cleanup, covered by e2e).
+  D.stickyDiffClear(null); // reset any residue from earlier tests
+  assert.strictEqual(D.stickyDiffArmed("s1"), false, "sticky: fresh state → not armed");
+  D.stickyDiffArm("s1");
+  assert.strictEqual(D.stickyDiffArmed("s1"), true, "sticky: arm → armed for that session");
+  assert.strictEqual(D.stickyDiffArmed("s2"), false, "sticky: s1's arm does not leak to s2");
+  assert.strictEqual(D.stickyDiffArmed(null), false, "sticky: a null session can never be armed");
+  D.stickyDiffClear("s2");
+  assert.strictEqual(D.stickyDiffArmed("s1"), true, "sticky: clearing another session is a no-op");
+  D.stickyDiffClear("s1");
+  assert.strictEqual(D.stickyDiffArmed("s1"), false, "sticky: explicit view/preview pick disarms");
+  D.stickyDiffArm(null);
+  assert.strictEqual(D.stickyDiffArmed(null), false, "sticky: arming without a session id is a no-op");
   assert.deepStrictEqual(D.paneToggleModes(true, "a.md"), ["diff", "view", "preview"], "toggle: diffable md → all three");
   assert.deepStrictEqual(D.paneToggleModes(true, "a.txt"), ["diff", "view"], "toggle: diffable text → two");
   assert.deepStrictEqual(D.paneToggleModes(false, "a.md"), ["view", "preview"], "toggle: unchanged md → view + preview");
@@ -716,14 +750,24 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
   // view's head only). Called directly — the harness does not render child
   // components inside FilesView.
   const paneProps = { name: "a.txt", relPath: "a.txt", wsRoot: "/ws", openCapable: false,
+    sessionId: null,
     status: null, base: "worktree", rev: null, changesetKnown: true,
     readAt: () => Promise.resolve({}), fetchDiff: () => Promise.resolve({ patch: "" }),
     readMermaid: () => Promise.resolve({ text: "" }), t: (k) => k,
     navCollapsed: false, onToggleNav: () => {}, navId: "test-nav" };
+  const allText = (n) => Array.isArray(n.c)
+    ? n.c.map((x) => (typeof x === "string" ? x : x && typeof x === "object" ? allText(x) : "")).join("")
+    : (typeof n.c === "string" ? n.c : "");
   const paneEl = D.PreviewPane(paneProps);
   const heads = findEl(paneEl, (n) => n.p && n.p.className === "dswFiles_paneHead");
-  assert.strictEqual(heads.length, 1, "the selected file's name renders as the pane's general header");
-  assert.strictEqual(childText(heads[0]), "a.txt", "the pane header shows the file's name");
+  assert.strictEqual(heads.length, 1, "the selected file's path renders as the pane's general header");
+  // At rest the head row shows the file's PATH (dim directory + name), which
+  // a click/selection morphs into the ref token: assert the at-rest shape —
+  // the path span, not a bare name text node.
+  assert.strictEqual(allText(heads[0]), "a.txt", "the pane header shows the file's path");
+  const headPaths = findEl(heads[0], (n) => n.p && n.p.className === "dswFiles_paneHeadPath");
+  assert.strictEqual(headPaths.length, 1, "at rest: the path (dim dir + name) is shown, no ref token yet");
+  assert.strictEqual(findEl(heads[0], (n) => n.p && n.p.className === "dswFiles_paneHeadToken").length, 0, "no click/selection → no token in the head row");
   const emptyPane = D.PreviewPane({ ...paneProps, name: null });
   assert.strictEqual(findEl(emptyPane, (n) => n.p && n.p.className === "dswFiles_paneHead").length, 0, "nothing selected → no pane header");
   // The state pair's RESTORE control: in the view bar only while the nav is
@@ -1228,6 +1272,12 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
   assert.strictEqual(H.buildFileRef({ path: "src/foo.ts" }), "@src/foo.ts", "ref: whole file, no fragment");
   assert.strictEqual(H.buildFileRef({ path: "src/foo.ts", start: 12 }), "@src/foo.ts:12", "ref: single line");
   assert.strictEqual(H.buildFileRef({ path: "src/foo.ts", start: 12, end: 40 }), "@src/foo.ts:12-40", "ref: line range");
+  assert.strictEqual(H.buildFileRef({ path: "src/foo.ts", start: 12, col: 34 }), "@src/foo.ts:12:34", "ref: single line + column (the file:line:col convention)");
+  assert.strictEqual(H.buildFileRef({ path: "src/foo.ts", start: 40, end: 12, col: 34 }), "@src/foo.ts:12-40", "ref: a range has no column");
+  assert.strictEqual(H.buildFileRef({ path: "src/foo.ts", start: 12, end: 12, col: 34, text: "const x" }), "@src/foo.ts:12 \"const x\"", "ref: a quoted selection is anchored by its text, not a column");
+  assert.strictEqual(H.buildFileRef({ path: "src/foo.ts", start: 12, col: 0 }), "@src/foo.ts:12", "ref: a non-positive column is dropped");
+  assert.strictEqual(H.buildFileRef({ path: "src/foo.ts", start: 12, col: 34, rev: "abc123" }), "@src/foo.ts@abc123:12:34", "ref: rev + line:col");
+  assert.strictEqual(H.buildFileRef({ path: "/abs/foo.ts", start: 12, col: 34, bare: true }), "/abs/foo.ts:12:34", "ref: bare external with line:col");
   assert.strictEqual(H.buildFileRef({ path: "src/foo.ts", start: 12, end: 12 }), "@src/foo.ts:12", "ref: degenerate range collapses");
   assert.strictEqual(H.buildFileRef({ path: "src/foo.ts", start: 40, end: 12 }), "@src/foo.ts:12-40", "ref: end < start is re-ordered");
   assert.strictEqual(
@@ -1262,6 +1312,33 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
   // Blank/whitespace text produces no quote at all (the plain ref stands alone).
   assert.strictEqual(H.buildFileRef({ path: "p.ts", start: 3, text: "   \n " }), "@p.ts:3", "ref: blank text → no quote");
   assert.strictEqual(H.buildFileRef({ path: "p.ts", text: "" }), "@p.ts", "ref: empty text, no range → bare mention");
+  // External (out-of-workspace) files: bare — NO `@` (that grammar is
+  // workspace-relative by dsh's convention), the absolute path verbatim.
+  // Whitespace inside a bare path stays as-is (no mention grammar to break).
+  assert.strictEqual(H.buildFileRef({ path: "/home/u/notes.md", bare: true }), "/home/u/notes.md", "bare ref: whole file, no @");
+  assert.strictEqual(H.buildFileRef({ path: "/home/u/notes.md", start: 12, end: 40, bare: true }), "/home/u/notes.md:12-40", "bare ref: line range");
+  assert.strictEqual(H.buildFileRef({ path: "/home/u/my notes.md", start: 12, bare: true }), "/home/u/my notes.md:12", "bare ref: a space is fine unquoted");
+  assert.strictEqual(
+    H.buildFileRef({ path: "/home/u/notes.md", text: "Deploying to prod", bare: true }),
+    '/home/u/notes.md "Deploying to prod"', "bare ref: snippet-only shape");
+  assert.strictEqual(
+    H.buildFileRef({ path: "/home/u/notes.md", start: 12, text: "const x = 1;", bare: true }),
+    '/home/u/notes.md:12 "const x = 1;"', "bare ref: snippet follows the fragment");
+}
+
+// commitRefToChat: the dedupe + separator + trailing-space contract of the
+// insert action (the DOM half — fullscreen exit, composer focus — is e2e's).
+{
+  const drafts = [];
+  const commit = (draft, ref) => H.commitRefToChat(draft, ref, (t) => drafts.push(t));
+  commit("", "@a.txt:1");
+  assert.strictEqual(drafts[0], "@a.txt:1 ", "commit: empty draft → the ref + its trailing space");
+  commit("@a.txt:1 ", "@a.txt:1");
+  assert.strictEqual(drafts.length, 1, "commit: repeating the ref the draft already ends with is a no-op");
+  commit("hello", "@a.txt:1");
+  assert.strictEqual(drafts[1], "hello @a.txt:1 ", "commit: non-blank draft without trailing space → a separating space");
+  commit("hello ", "@a.txt:2");
+  assert.strictEqual(drafts[2], "hello @a.txt:2 ", "commit: a draft ending in whitespace → no double space");
 }
 
 // ---- Right-column takeover (the dsh sidebar-right replacement) ----

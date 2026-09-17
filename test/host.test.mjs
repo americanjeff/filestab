@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, symlink, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert";
@@ -301,5 +301,77 @@ const call = async (endpoint, payload, rpcId = "rpc-" + Math.random().toString(1
   const r = await call("list", { sessionId: "nope", relPath: "" });
   assert.ok(!r.ok && r.error.code === "session-not-found", "no persistence service → session-not-found: " + JSON.stringify(r)); n++; }
 
+// ── tick: the live-update gate ──────────────────────────────────────────
+// This workspace is PLAIN (no VCS): the gate is the open-file stat alone;
+// the deep read degrades to a walk + cached structural VCS failures.
+// openMtime mirrors what the client declares: the listing's rounded mtime.
+const mtimeOf = async (p) => Math.round((await stat(p)).mtimeMs);
+{ const r = await call("tick", { sessionId: SESSION_ID, dirs: ["", "sub"] });
+  assert.ok(r.ok, "tick ok: " + JSON.stringify(r?.error ?? null));
+  assert.strictEqual(r.value.openFile, "same", "no open file declared → openFile same");
+  assert.strictEqual(r.value.list, "same", "cold tick baselines (the client already holds these listings): " + JSON.stringify(r.value));
+  n++; }
+{ const r = await call("tick", { sessionId: SESSION_ID, dirs: ["", "sub"], openFile: "a.txt", openMtime: await mtimeOf(join(ws, "a.txt")) });
+  assert.ok(r.ok, "quiet tick ok");
+  assert.strictEqual(r.value.openFile, "same", "disk matches the declared mtime → same: " + JSON.stringify(r.value));
+  assert.strictEqual(r.value.list, "same", "quiet gate → list same (no deep read): " + JSON.stringify(r.value));
+  n++; }
+{ const before = await mtimeOf(join(ws, "a.txt"));
+  await new Promise((res) => setTimeout(res, 5)); // ensure a distinct mtime (ms resolution)
+  await writeFile(join(ws, "a.txt"), "hello EDITED");
+  const r = await call("tick", { sessionId: SESSION_ID, dirs: ["", "sub"], openFile: "a.txt", openMtime: before });
+  assert.ok(r.ok, "edit tick ok");
+  assert.strictEqual(r.value.openFile, "changed", "disk mtime ≠ declared → openFile changed");
+  assert.ok(r.value.list !== "same", "an open-file edit trips the list read (the marks are stale too)");
+  const root = r.value.list.listings[0];
+  assert.ok(!("error" in root) && root.relPath === "", "first slot is the root listing");
+  const a = root.entries.find((e) => e.name === "a.txt");
+  assert.ok(a && a.mtime > before, "the fresh listing carries the new mtime");
+  assert.ok(root.vcs && root.vcs.ok === false, "the vcs block rides once, on the first good listing (plain ws → structural failure)");
+  assert.ok(!("vcs" in r.value.list.listings[1]), "no per-dir vcs repetition");
+  n++; }
+{ const r = await call("tick", { sessionId: SESSION_ID, dirs: ["", "sub"], openFile: "a.txt", openMtime: await mtimeOf(join(ws, "a.txt")) });
+  assert.strictEqual(r.value.openFile, "same", "after applying the change, the declared mtime matches the disk → quiet again");
+  assert.strictEqual(r.value.list, "same", "quiet again");
+  n++; }
+// A new file in a directory the gate does not stat: the shallow tick CANNOT
+// see it (no VCS metadata moved); the deep tick (the client's slow cycle)
+// walks and finds it.
+{ await writeFile(join(ws, "fresh.txt"), "brand new\n");
+  const shallow = await call("tick", { sessionId: SESSION_ID, dirs: ["", "sub"] });
+  assert.strictEqual(shallow.value.list, "same", "shallow gate is blind to a new file (the deep cycle's job)");
+  // Duplicate dirs in the payload: the response must keep one slot per
+  // unique dir — the client applies slots in order, and a duplicate root
+  // slot without the vcs block would clobber the marks (regression).
+  const deep = await call("tick", { sessionId: SESSION_ID, dirs: ["", "", "sub"], deep: true });
+  assert.ok(deep.value.list !== "same", "deep tick walks → list changed");
+  const rels = deep.value.list.listings.map((l) => ("error" in l ? null : l.relPath));
+  assert.deepStrictEqual(rels, ["", "sub"], "one slot per unique dir: " + JSON.stringify(rels));
+  const root = deep.value.list.listings[0];
+  assert.ok(root.entries.some((e) => e.name === "fresh.txt"), "the single root slot is the fresh listing");
+  assert.ok(root.vcs, "…and it carries the vcs block");
+  n++; }
+{ const r = await call("tick", { sessionId: SESSION_ID, dirs: ["", "sub"], openFile: "fresh.txt", openMtime: await mtimeOf(join(ws, "fresh.txt")) });
+  assert.strictEqual(r.value.openFile, "same", "declared mtime for a file the gate has never baselined: disk-vs-declared, no server state");
+  n++; }
+{ await rm(join(ws, "a.txt"));
+  const r = await call("tick", { sessionId: SESSION_ID, dirs: ["", "sub"], openFile: "a.txt", openMtime: 1234 });
+  assert.strictEqual(r.value.openFile, "changed", "the open file went away (ENOENT) → changed (the pane re-reads into its error state)");
+  n++; }
+{ const r = await call("tick", { sessionId: SESSION_ID, dirs: ["", "sub"], openFile: "a.txt", openMtime: 1234 });
+  assert.strictEqual(r.value.openFile, "changed", "still changed while it stays gone (disk-vs-declared has no baseline to hide behind)");
+  n++; }
+{ await rm(join(ws, "sub"), { recursive: true, force: true });
+  const r = await call("tick", { sessionId: SESSION_ID, dirs: ["", "sub"], deep: true });
+  assert.ok(r.ok, "vanished-dir tick ok");
+  assert.ok(r.value.list !== "same", "a vanished directory changes the list");
+  const slot = r.value.list.listings[1];
+  assert.ok("error" in slot && slot.error === "not-found" && slot.relPath === "sub", "the vanished dir's slot is its dir-level error: " + JSON.stringify(slot));
+  n++; }
+{ const r = await call("tick", { sessionId: SESSION_ID, dirs: ["", "sub"], openFile: "../escape.txt", openMtime: 1234 });
+  assert.ok(r.ok, "containment-rejected openFile does not error the tick");
+  assert.strictEqual(r.value.openFile, "same", "…and claims no change (no re-fetch storm over a bad path)");
+  n++; }
+
 await rm(base, { recursive: true, force: true });
-console.log(`host: ${n} assertions passed (browse + cold-session resolution + fileshow worktree + fileshow-abs + mermaid bundle)`);
+console.log(`host: ${n} assertions passed (browse + cold-session resolution + fileshow worktree + fileshow-abs + mermaid bundle + tick gate)`);

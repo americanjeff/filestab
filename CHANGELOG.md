@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6] - 2026-09-17
+
+- Files view: selecting a file now opens it as its CONTENT (preview for markdown, raw view otherwise) — never as a diff, even for a VCS-changed file (a deleted file still opens as its diff, which is its only view). Picking Diff explicitly is soft-sticky for the session: subsequent diffable selections also start in Diff until an explicit View/Preview pick, a session switch, or closing the Files view disarms it. The preference is in-memory only — a page reload drops it.
+- Files view: click a character in the raw view to get a precise ref to exactly that location — the head row morphs from the file path into the exact `@path:line:col` token, with copy and add-to-chat buttons. Clicking the rendered markdown preview resolves to the source line too (a code fence or plain paragraph gives the exact `:line:col`).
+- The file list, the change marks, and the open preview now update live while the view is open — edits by the agent or on disk appear within a few seconds, no reload or re-selection.
+- jj workspaces: a new file shows the unadded (U) marker, matching git's `??` — jj has no staging area, so a worktree add is the unadded state.
+
 ## [0.1.5] - 2026-09-15
 
 - Right column: on dsh 0.1.5, filestab serves the right sidebar's files slot — the column opens straight onto one filestab view (replacing the built-in per-file tabs and the conversation-area Files tab), and file chips select their file in that view, scrolling to the mentioned line. The file list toggles as a hide/restore state pair and is preserved when a file is opened from a chip.

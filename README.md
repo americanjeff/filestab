@@ -19,6 +19,10 @@ Markdown with task lists, syntax highlighting, and mermaid diagrams:
 
 ![filestab rendering a markdown file: task lists, a highlighted TypeScript code fence, and a mermaid diagram in a sealed frame](assets/preview-markdown.png)
 
+Two clicks to start a prompt about a specific location in a file:
+
+![clicking a character in the raw view: the head row shows the exact @path:line:col token, Add ref to chat inserts the ref into the composer, the agent changes exactly that number, and the diff shows the result](assets/add-ref-to-chat.gif)
+
 ## Install
 
 ```sh
@@ -31,7 +35,7 @@ Install it into the web profile, the one that runs the GUI.
 
 To test a local checkout instead of the published package, install it directly: `dsh plugin --profile web add /path/to/filestab`
 
-The published npm package ships a prebuilt `dist/` bundle (built during `prepack`), so registry installs need no build step. For a source checkout or local path install, run `pnpm install && npm run build` first so the bundle exists.
+For a source checkout or local path install, run `pnpm install && npm run build` first so the bundle exists.
 
 ```sh
 pnpm install     # a local (uncommitted) .npmrc may pin the pnpm store repo-locally
@@ -40,10 +44,4 @@ npm test         # build + the full suite (pure parser tests + real jj/git I/O w
 npm run e2e      # browser journeys against a sandboxed dsh instance
 ```
 
-## Changelog
-
-Coarse, per-release: [CHANGELOG.md](CHANGELOG.md) · [Releases](https://github.com/americanjeff/filestab/releases).
-
-## License
-
-MIT. See [LICENSE](./LICENSE).
+[CHANGELOG.md](CHANGELOG.md) · [Releases](https://github.com/americanjeff/filestab/releases).

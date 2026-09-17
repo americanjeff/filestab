@@ -290,7 +290,13 @@ export async function jjWorkspaceStatus(
   const keep = (e: ChangeEntry) => insideWorkspace(e.path) || (e.oldPath !== null && e.oldPath !== undefined && insideWorkspace(e.oldPath));
   const byPath = new Map<string, ChangeEntry & { base: "worktree" | "conflict" }>();
   for (const e of parseSummary(s1.value).filter(keep))
-    byPath.set(e.path, { path: e.path, status: e.status, oldPath: e.oldPath ?? null, base: "worktree" });
+    // jj has no staging area: an `A` in the worktree diff (@ vs @-) means
+    // "on disk, not yet in any real commit" — jj auto-snapshotted it, the
+    // user did nothing. That IS the unadded (U) state git shows for `??`
+    // files, so the markers agree across backends. Renames keep R (the
+    // destination has an oldPath; a rename's source side is a tracked
+    // deletion, not an unadded file).
+    byPath.set(e.path, { path: e.path, status: e.status === "A" ? "U" : e.status, oldPath: e.oldPath ?? null, base: "worktree" });
   for (const p of conflicts) {
     const cur = byPath.get(p);
     if (cur) cur.status = "C";

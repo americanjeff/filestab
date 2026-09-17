@@ -1,8 +1,8 @@
 // test/e2e/e2e.test.mjs, end-to-end journeys against a sandboxed dsh instance
 // driven by a real headless browser (playwright-core + a playwright chromium).
 //
-// Scope: the Files view journeys J1, J1.2, J3, J4, J5, J6, J19 (each defined
-// by its section header below). On 0.1.5 the Files view is the dsh RIGHT PANE
+// Scope: the Files view journeys J1, J1.2, J3, J4, J5, J6, J7, J8, J19, J20 (each
+// defined by its section header below). On 0.1.5 the Files view is the dsh RIGHT PANE
 // (filestab serves the files slot; the conversation area has no Files tab), so
 // openSession opens that pane via the host's own expand button.
 // The workspace picker and the send-a-message session flow are dsh's own UI;
@@ -100,12 +100,14 @@ function makeFixtures(root) {
   mkdirSync(fx.plain, { recursive: true });
   writeFileSync(join(fx.plain, "hi.txt"), "hi\n");
   // J4: markdown — heading, bold, list, a GFM table, a javascript: link
-  // (markdown-it's default link validator must drop it, text stays visible)
-  // and a mermaid fence (J5's frame assertions).
+  // (markdown-it's default link validator must drop it, text stays visible),
+  // a PLAIN paragraph (renders 1:1 to source → the click ref carries a
+  // column), and a mermaid fence (J5's frame assertions).
   writeFileSync(join(fx.plain, "doc.md"),
     "# Doc\n\nA **bold** para.\n\n- item\n\n" +
     "| h1 | h2 |\n| -- | -- |\n| a  | b  |\n\n" +
     "[js link](javascript:alert(1))\n\n" +
+    "plain paragraph line\n\n" +
     "```mermaid\nflowchart TD\n  A-->B\n```\n");
   // J5: sandboxed HTML — the script must run IN the frame only: it sets the
   // frame's title, tries to write a PARENT property (opaque origin must
@@ -122,6 +124,15 @@ function makeFixtures(root) {
     "setInterval(function () { window.__ticks++; parent.postMessage({ filezProbeTick: window.__ticks }, \"*\"); }, 50);\n" +
     "fetch(\"http://127.0.0.1:1/csp-probe\").catch(function () {});\n" +
     "</script>\n");
+  // F-JJ-20: J20's own fresh jj session — a FIRST mount of the Files view
+  // (no nav cache, no earlier journey on the page), the exact case where a
+  // dead tick interval stays dead. Kept separate from fj so J20's disk
+  // mutations (a.txt edit, fresh.txt) can't disturb the pinned fj journeys.
+  fx.fj20 = join(fx.root, "fj20");
+  mkdirSync(fx.fj20, { recursive: true });
+  execFileSync("jj", ["git", "init"], { cwd: fx.fj20 });
+  execFileSync("jj", ["new", "-m", "base"], { cwd: fx.fj20 });
+  writeFileSync(join(fx.fj20, "a.txt"), "one\ntwo\n");
   return fx;
 }
 
@@ -315,15 +326,17 @@ async function j1_firstLook(u) {
     ok(names.includes(n), `row ${n} present (have: ${names.join(", ")})`);
   }
   ok(!names.includes(".jj") && !names.includes(".git"), `hidden entries absent by default (have: ${names.join(", ")})`);
-  eq((await u.row("a.txt").locator(".dswFiles_badge").innerText()).trim(), "A", "a.txt carries the A (added) badge");
+  eq((await u.row("a.txt").locator(".dswFiles_badge").innerText()).trim(), "U", "a.txt carries the U (unadded) badge (a jj worktree add IS the unadded state)");
   const footer = await u.root().locator(".dswFiles_footerBar").innerText();
   ok(footer.includes("6 items"), `footer counts 6 items, got: ${footer.replace(/\n/g, " ")}`);
   ok((await u.previewText()).includes("Select a file to preview"), "preview starts empty");
 }
 
-// The pane defaults to Diff mode for a VCS-changed file; the content preview
-// only renders after flipping to View mode (the toggle exists for any
-// selected file, and clicking an already-active mode is a no-op).
+// Defensive no-op helper from the diff-default era: a selected file now
+// opens as its CONTENT (view/preview) by default, so the View button is
+// usually already active (clicking an already-active mode is a no-op).
+// Kept for the journeys that call it — it stays correct if the default
+// ever flips back.
 async function viewMode(u) {
   const btn = u.root().locator(".dswFiles_paneToggleBtn", { hasText: /^View$/ });
   if (await btn.count() > 0) await btn.first().click();
@@ -346,6 +359,155 @@ async function j3_textPreview(u) {
   ok(t.length < 2000, "big.bin preview is a card, not a 2MB byte dump");
 }
 
+// J8: click → ref in the head row. A single click on a line morphs the head
+// row into the EXACT pasteable token (no selection → no text), and the copy
+// button puts that very string on the clipboard. A drag-selection supersedes
+// the click ref — and the selection ref always carries the selected text.
+// The insert commits the ref into the composer draft (exactly, deduped,
+// caret moved to the composer) — and exits fullscreen first when the right
+// bar is covering the conversation. Right-clicks are no longer intercepted
+// (the browser's native context menu is back — no custom menu appears).
+async function j8_clickRef(u) {
+  const root = u.root();
+  await u.row("a.txt").click();
+  await u.until(async () => (await root.locator("pre.dswFiles_previewText").count()) > 0, "a.txt text preview");
+  // At rest: the path (dim dir + name), no token, no ref buttons.
+  await u.until(async () => (await root.locator(".dswFiles_paneHeadPath").count()) === 1, "head row at rest");
+  eq((await root.locator(".dswFiles_paneHeadPath").innerText()).trim(), "a.txt", "at rest shows the workspace-relative path");
+  eq(await root.locator(".dswFiles_paneHeadToken").count(), 0, "no ref token at rest");
+  // The action cluster hugs the path (a 6px flex gap) — flush right would
+  // read as "acts on the file", not "acts on the ref".
+  const pathBox = await root.locator(".dswFiles_paneHeadPath").boundingBox();
+  const btnBox = await root.locator(".dswFiles_paneHeadBtns").boundingBox();
+  ok(btnBox.x - (pathBox.x + pathBox.width) <= 10, `the button cluster sits next to the path (gap ${Math.round(btnBox.x - pathBox.x - pathBox.width)}px)`);
+  // The hover text names the ACTION the click will take (the payload is
+  // what the row shows).
+  eq((await root.locator(".dswFiles_paneHeadBtns button").getAttribute("title")), "Copy path", "at rest the copy button's tooltip names the path action");
+  const pre = root.locator("pre.dswFiles_previewText");
+  const box = await pre.boundingBox();
+  // Click line 1 (pre padding 8px, line-height 18px → y+10 is inside line 1).
+  await u.page.mouse.click(box.x + 12, box.y + 10);
+  await u.until(async () => (await root.locator(".dswFiles_paneHeadToken").count()) === 1, "click on a line → the ref token in the head row");
+  const token = await root.locator(".dswFiles_paneHeadToken").getAttribute("title");
+  match(token, /^@a\.txt:1:\d+$/, `the head row shows the exact pasteable token (raw click = line + column), got: ${token}`);
+  eq(await root.locator(".dswFiles_paneHeadBtns button[aria-label='Copy ref']").getAttribute("title"), "Copy ref", "with a ref the copy button's tooltip names the ref action");
+  eq(await root.locator(".dswFiles_paneHeadBtns button[aria-label='Add ref to chat']").getAttribute("title"), "Add ref to chat", "the insert button's tooltip names the insert action");
+  // The copy button puts that EXACT string on the clipboard.
+  await u.page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: new URL(u.page.url()).origin });
+  await root.locator(".dswFiles_paneHeadBtns button[aria-label='Copy ref']").click();
+  eq(await u.page.evaluate(() => navigator.clipboard.readText()), token, "copy ref → the head row's exact token on the clipboard");
+  // A right-click no longer opens any filestab menu (the native menu is the browser's).
+  await u.page.mouse.click(box.x + 12, box.y + 10, { button: "right" });
+  await u.page.waitForTimeout(300);
+  eq(await root.locator(".dswFiles_ctxMenu").count(), 0, "right-click is not intercepted (no custom menu)");
+  // A drag-selection across lines 1–2 supersedes the click ref — and, per
+  // the gesture rule, the selection ref ALWAYS carries the selected text.
+  await u.page.mouse.move(box.x + 12, box.y + 10);
+  await u.page.mouse.down();
+  await u.page.mouse.move(box.x + 12, box.y + 30, { steps: 4 });
+  await u.page.mouse.up();
+  await u.until(async () => {
+    const tk = await root.locator(".dswFiles_paneHeadToken").getAttribute("title").catch(() => null);
+    return tk && tk.includes("-") && tk.includes('"');
+  }, "drag → a range token with the selected text supersedes the click ref");
+  const range = await root.locator(".dswFiles_paneHeadToken").getAttribute("title");
+  match(range, /^@a\.txt:1-\d+ "[\s\S]*"$/, `the selection ref is a range from line 1 with the selected text, got: ${range}`);
+  // COMMIT: the insert lands the exact ref in the composer, moves the caret
+  // there, and a repeat click is a no-op (the dedupe).
+  await u.page.mouse.click(box.x + 12, box.y + 10); // a fresh click ref (the drag's selection is gone)
+  await u.until(async () => {
+    const tk = await root.locator(".dswFiles_paneHeadToken").getAttribute("title").catch(() => null);
+    return tk === token;
+  }, "the click ref is back (no selection → no text)");
+  const insertBtn = root.locator(".dswFiles_paneHeadBtns button[aria-label='Add ref to chat']");
+  const composer = () => u.page.locator("[data-composer-input]");
+  await insertBtn.click();
+  await u.until(async () => {
+    const txt = await composer().textContent().catch(() => "");
+    return (txt || "").includes(token);
+  }, "the ref lands in the composer draft");
+  eq(await composer().textContent(), token + " ", "the draft is exactly the ref + its trailing space");
+  ok(await u.page.evaluate(() => !!document.activeElement && document.activeElement.hasAttribute("data-composer-input")), "the composer holds the caret after the insert");
+  await insertBtn.click();
+  await u.page.waitForTimeout(150);
+  eq(await composer().textContent(), token + " ", "a repeat insert is a no-op (the dedupe)");
+  // Fullscreen: the right bar IS the window — the composer is mounted but
+  // covered. The insert hands the window back through the host's own exit
+  // control first, then commits and focuses.
+  await u.page.locator('[data-sidebar-right-mode="fullscreen"]').first().click();
+  await u.until(async () => (await u.page.locator('[data-sidebar-right-panel="fullscreen"]').count()) === 1, "the right bar enters fullscreen");
+  await u.page.waitForTimeout(300); // let the width transition settle before taking coordinates
+  const box2 = await root.locator("pre.dswFiles_previewText").boundingBox();
+  await u.page.mouse.click(box2.x + 12, box2.y + 28); // line 2
+  await u.until(async () => {
+    const tk = await root.locator(".dswFiles_paneHeadToken").getAttribute("title").catch(() => null);
+    return !!tk && tk.startsWith("@a.txt:2:");
+  }, "line 2's ref resolves in fullscreen (with its column)");
+  const token2 = await root.locator(".dswFiles_paneHeadToken").getAttribute("title");
+  await root.locator(".dswFiles_paneHeadBtns button[aria-label='Add ref to chat']").click();
+  await u.until(async () => (await u.page.locator('[data-sidebar-right-panel="fullscreen"]').count()) === 0, "the insert exits fullscreen");
+  await u.until(async () => {
+    const txt = await composer().textContent().catch(() => "");
+    return (txt || "").includes(token2);
+  }, "line 2's ref lands in the composer");
+  eq(await composer().textContent(), token + " " + token2 + " ", "both refs in the draft, one space apart");
+  ok(await u.page.evaluate(() => !!document.activeElement && document.activeElement.hasAttribute("data-composer-input")), "the composer holds the caret after the fullscreen insert");
+  // Switching the file clears the ref back to the at-rest path.
+  await u.row("big.bin").click();
+  await u.until(async () => (await root.locator(".dswFiles_paneHeadPath").count()) === 1, "big.bin head row back at rest");
+  eq((await root.locator(".dswFiles_paneHeadPath").innerText()).trim(), "big.bin", "file switch → at-rest path, no stale ref");
+  eq(await root.locator(".dswFiles_paneHeadToken").count(), 0, "file switch clears the ref token");
+}
+
+// J7: the SOFT-STICKY diff preference. A fresh selection opens as its
+// content (view/preview) — never as a diff, even for a VCS-changed file.
+// An explicit Diff pick ARMS the preference for the session, so the next
+// diffable selection starts in Diff with no click. An explicit View/Preview
+// pick disarms it (the last explicit choice wins). The preference is
+// in-memory only: a page reload drops it even while armed (J7's final
+// step), so a fresh load starts content-default again.
+async function j7_stickyDiff(u) {
+  const btn = (label) => u.root().locator(".dswFiles_paneToggleBtn", { hasText: new RegExp("^" + label + "$") });
+  const activeBtn = (label) => u.root().locator(".dswFiles_paneToggleBtnActive", { hasText: new RegExp("^" + label + "$") });
+  const rawText = () => u.root().locator(".dswFiles_previewText").innerText().catch(() => "").then((t) => t ?? "");
+  // 1) A fresh selection of a VCS-changed file opens as its content.
+  await u.row("a.txt").click();
+  await u.until(async () => (await rawText()).includes("one"), "a.txt opens in view by default (not diff)");
+  eq(await u.root().locator(".dswFiles_diff").count(), 0, "a fresh selection never starts in diff");
+  eq(await activeBtn("View").count(), 1, "View is the default active mode for a diffable text file");
+  // 2) The explicit Diff pick arms the soft-sticky preference.
+  await btn("Diff").first().click();
+  await u.until(async () => (await u.root().locator(".dswFiles_diff").count()) === 1, "a.txt renders its diff after the explicit pick");
+  eq(await activeBtn("Diff").count(), 1, "Diff is active after the pick");
+  // 3) The NEXT diffable selection starts in Diff — the stick, no click.
+  await u.row("doc.md").click();
+  await u.until(async () => (await u.root().locator(".dswFiles_diff").count()) === 1, "doc.md opens in Diff via the soft-sticky preference");
+  eq(await activeBtn("Diff").count(), 1, "Diff is active on the sticky selection without a click");
+  // 4) An explicit View pick disarms it (last explicit choice wins).
+  await btn("View").first().click();
+  await u.until(async () => (await rawText()).includes("# Doc"), "View shows doc.md's raw source");
+  // 5) The next selection is back to the content default.
+  await u.row("page.html").click();
+  await u.until(async () => (await rawText()).includes("<!doctype html>"), "page.html opens as raw view (preference disarmed)");
+  eq(await u.root().locator(".dswFiles_diff").count(), 0, "no diff after the disarming View pick");
+  eq(await activeBtn("View").count(), 1, "View is active again");
+  // 6) Re-arm, and the stick holds through a binary (image) file.
+  await btn("Diff").first().click();
+  await u.until(async () => (await u.root().locator(".dswFiles_diff").count()) === 1, "page.html renders its diff after the re-arm");
+  await u.row("pic.png").click();
+  await u.until(async () => (await u.root().locator(".dswFiles_diffBinaryRow").count()) === 1, "pic.png opens in Diff (the stick holds through a binary)");
+  // 7) A page reload DROPS the preference (in-memory, never persisted): the
+  //    restored selection (pic.png, J7's last pick) starts as content.
+  await u.page.reload({ waitUntil: "domcontentloaded" });
+  const expand = u.page.locator('[data-sidebar-right-expand]');
+  await u.until(async () => (await expand.count()) > 0, "conversation back after reload", 30_000);
+  await expand.click();
+  await u.until(async () => (await u.root().count()) === 1, "Files view back after reload", 30_000);
+  await u.until(async () => (await u.root().locator(".dswFiles_previewImage").count()) === 1, "the restored pic.png renders as content after reload");
+  eq(await u.root().locator(".dswFiles_diff").count(), 0, "the reload dropped the armed preference (no diff on restore)");
+  eq(await activeBtn("View").count(), 1, "View is active on the restored selection");
+}
+
 // J4: markdown — with nothing diffable (a VCS-less workspace) the preview is
 // the DEFAULT and renders: heading, bold, list, GFM table. A javascript: link
 // must not become an anchor (markdown-it's link validator drops it, the text
@@ -362,6 +524,48 @@ async function j4_markdown(u) {
   eq(await md.locator("table").count(), 1, "md: GFM table rendered");
   eq(await md.locator('a[href^="javascript:"]').count(), 0, "md: javascript: link is not an anchor");
   ok((await md.innerText()).includes("js link"), "md: the dropped link's text stays visible");
+  // Line refs in the RENDERED preview: filestab owns the markdown render, so
+  // it stamps each content block with its source line — a click resolves to
+  // the line (plus the column when the rendered text maps 1:1 onto the
+  // source), a selection to the line range. Formatted blocks (heading, bold,
+  // list, table) can't map rendered columns onto source columns — stripped
+  // markup shifts them — and stay line-only, never a wrong number.
+  // Fixture lines: 1:# Doc  3:A **bold** para.  5:- item  9:| a | b |
+  //                13:plain paragraph line
+  const token = u.root().locator(".dswFiles_paneHeadToken");
+  const title = () => token.getAttribute("title").catch(() => null);
+  await md.locator("h1").click();
+  await u.until(async () => (await title()) === "@doc.md:1", "click the heading → its line");
+  eq(await title(), "@doc.md:1", "md: formatted heading → line ref only (the # shifts the columns)");
+  await md.locator("strong").click();
+  await u.until(async () => (await title()) === "@doc.md:3", "click the paragraph → its line");
+  eq(await title(), "@doc.md:3", "md: formatted paragraph → line ref only (the ** shifts the columns)");
+  await md.locator("td", { hasText: "b" }).click();
+  await u.until(async () => (await title()) === "@doc.md:9", "click a table cell → the row's line");
+  eq(await title(), "@doc.md:9", "md: table cell → the row's line ref (the pipes shift the columns)");
+  await md.locator("li").click();
+  await u.until(async () => (await title()) === "@doc.md:5", "click the tight list item → its line");
+  eq(await title(), "@doc.md:5", "md: list item → line ref only (the - marker shifts the columns)");
+  // A PLAIN line renders byte-identical to its source → the click also
+  // carries the COLUMN (file:line:col).
+  await md.locator("p", { hasText: "plain paragraph line" }).click({ position: { x: 20, y: 8 } });
+  await u.until(async () => {
+    const tk = await title();
+    return !!tk && /^@doc\.md:13:\d+$/.test(tk);
+  }, "click a plain markdown line → its line AND column");
+  match(await title(), /^@doc\.md:13:[1-9]\d*$/, "md: plain line → the exact source column");
+  // A selection spanning lines 3-5 → the range ref with the selected text.
+  const sb = await md.locator("strong").boundingBox();
+  const lb = await md.locator("li").boundingBox();
+  await u.page.mouse.move(sb.x + 4, sb.y + sb.height / 2);
+  await u.page.mouse.down();
+  await u.page.mouse.move(lb.x + 8, lb.y + lb.height / 2, { steps: 4 });
+  await u.page.mouse.up();
+  await u.until(async () => {
+    const tk = await title();
+    return !!tk && tk.startsWith('@doc.md:3-5 "');
+  }, "selection across lines 3-5 → the range ref with the selected text");
+  match(await title(), /^@doc\.md:3-5 "[\s\S]*$/, "md: selection across lines → the range ref with the text");
   // Mermaid fence → sealed frame, the SVG rendered INSIDE the frame.
   const frame = u.root().locator(".dswFiles_mermaidFrame");
   await u.until(async () => {
@@ -421,11 +625,14 @@ async function j5_htmlSandbox(u) {
   ok(String(probe).startsWith("parent-write-blocked"), `opaque origin blocked the parent write, got: ${probe}`);
   eq(await page.evaluate("window.__filezProbe"), undefined, "no parent property leaked into the app");
   // The timer ticks while the frame is alive, and stops after unmount.
+  // t1 is captured AFTER the unmount: a tick between an earlier capture and
+  // the unmount is a race (the frame is still alive then), and any tick
+  // after the capture is what "stopped" must rule out.
   await u.until(async () => ((await page.evaluate("window.__lastTick")) ?? 0) >= 2, "frame timer ticking (postMessage)");
-  const t1 = await page.evaluate("window.__lastTick");
-  ok(typeof t1 === "number" && t1 >= 2, "ticks observed before unmount");
   await u.row("hi.txt").click();
   await u.until(async () => (await u.root().locator(".dswFiles_previewHtml").count()) === 0, "html iframe unmounted");
+  const t1 = await page.evaluate("window.__lastTick");
+  ok(typeof t1 === "number" && t1 >= 2, "ticks observed while the frame was alive");
   await page.waitForTimeout(400);
   eq(await page.evaluate("window.__lastTick"), t1, "timer stopped: no ticks after unmount");
   eq(cspProbeHits, 0, "CSP blocked the fetch (no request left the frame)");
@@ -508,6 +715,34 @@ async function j1_2_plain(u) {
   ok((await u.previewText()).includes("Select a file to preview"), "preview starts empty");
 }
 
+// J20: live file updates, no user action. A file edited on disk refreshes the
+// OPEN preview (the tick's open-file gate sees the disk mtime move and bumps
+// the content epoch; the preview re-fetches the bytes). A brand-new file
+// appears in the list with the unadded (U) badge (jj auto-snapshots it, so a
+// worktree add IS the unadded state — the git `??` parity the markers carry).
+// Runs on its OWN fresh session (a first Files-view mount, empty nav cache)
+// — a remounted view (e.g. after collapse/expand) would start with cached
+// listings and mask a dead first-mount tick interval.
+async function j20_liveUpdates(u, ws) {
+  await u.row("a.txt").click();
+  const raw = u.root().locator("pre.dswFiles_previewText");
+  await u.until(async () => (await raw.innerText().catch(() => "")).includes("two"), "a.txt open in raw view");
+  // External writer edits the open file. The next tick's open-file gate
+  // (disk mtime vs the mtime the view holds) trips → content-epoch bump →
+  // re-fetch. No click, no reload, no re-selection.
+  writeFileSync(join(ws, "a.txt"), "one\ntwo\nthree (edited on disk)\n");
+  await u.until(async () => (await raw.innerText()).includes("three (edited on disk)"),
+    "the open preview auto-refreshed the live edit", 20_000);
+  // A new file shows up in the list. The tick's shallow gate CANNOT see it
+  // (a worktree edit touches no VCS metadata), so it arrives on the deep
+  // cycle — every 3rd tick, a ≤15 s horizon — and carries U.
+  writeFileSync(join(ws, "fresh.txt"), "brand new\n");
+  await u.until(async () => (await u.rowNames()).includes("fresh.txt"),
+    "the new file's row appears via the deep tick cycle", 25_000);
+  eq((await u.row("fresh.txt").locator(".dswFiles_badge").innerText()).trim(), "U",
+    "fresh.txt carries the U (unadded) badge");
+}
+
 // ── main ───────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -526,7 +761,7 @@ async function main() {
     console.log(`e2e: dsh web on ${url.replace(/token=[^\s]+/, "token=…")}`);
     browser = await chromium.launch({ executablePath: findChrome(), headless: true, args: ["--no-sandbox"] });
 
-    // F-JJ session: J1, J3, J6, J19.
+    // F-JJ session: J1, J3, J8, J7, J6, J19.
     const a = await openSession(browser, { url, workspace: fx.fj });
     const ua = ui(a.page);
     await clickFilesTab(a.page);
@@ -534,6 +769,10 @@ async function main() {
     await j1_firstLook(ua);
     console.log("e2e: J3 text preview (+ >1MB card)");
     await j3_textPreview(ua);
+    console.log("e2e: J8 click → ref in the head row");
+    await j8_clickRef(ua);
+    console.log("e2e: J7 soft-sticky diff preference");
+    await j7_stickyDiff(ua);
     console.log("e2e: J6 image preview");
     await j6_imagePreview(ua);
     console.log("e2e: J19 nav-pane collapse/expand (state pair)");
@@ -554,7 +793,17 @@ async function main() {
     checkConsole(b, "plain");
     await b.context.close();
 
-    console.log(`e2e: PASS -- ${assertions} assertions across J1, J1.2, J3, J4, J5, J6, J19`);
+    // F-JJ-20 session: J20 on its own FIRST Files-view mount (fresh page +
+    // session, empty nav cache) — the fresh-mount live-update path.
+    const c = await openSession(browser, { url, workspace: fx.fj20 });
+    const uc = ui(c.page);
+    await clickFilesTab(c.page);
+    console.log("e2e: J20 live file updates (fresh mount, no user action)");
+    await j20_liveUpdates(uc, fx.fj20);
+    checkConsole(c, "fj20");
+    await c.context.close();
+
+    console.log(`e2e: PASS -- ${assertions} assertions across J1, J1.2, J3, J4, J5, J6, J7, J8, J19, J20`);
   } catch (e) {
     // Best-effort failure screenshot, then clean up and rethrow.
     const pages = browser ? [...browser.contexts().flatMap((c) => c.pages())] : [];

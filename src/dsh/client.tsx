@@ -67,7 +67,7 @@ const zh: Record<string, string> = {
   "files.resizePanels": "拖动调整面板宽度（双击恢复默认）",
   "files.hideNav": "隐藏文件列表", "files.restoreNav": "恢复文件列表",
   "files.guideTitle": "工作区文件", "files.guideDescription": "浏览会话工作区的文件",
-  "files.refAdd": "把引用添加到聊天", "files.refCopy": "复制引用", "files.refCopyText": "复制引用＋文本", "files.refCopyContext": "复制引用＋上下文", "files.refCopied": "已复制", "files.copyFile": "复制文件", "files.copySelection": "复制所选内容", "files.copyPath": "复制路径", "files.openLocal": "在本地打开", "files.openFailed": "无法在桌面打开该文件",
+  "files.refAdd": "把引用添加到聊天", "files.refCopy": "复制引用", "files.refCopied": "已复制", "files.copyPath": "复制路径", "files.openLocal": "在本地打开", "files.openFailed": "无法在桌面打开该文件",
   "files.ageNow": "刚刚", "files.ageMin": "{n} 分钟", "files.ageHour": "{n} 小时", "files.ageDay": "{n} 天",
   "files.type.png": "PNG 图像", "files.type.jpeg": "JPEG 图像", "files.type.gif": "GIF 图像",
   "files.type.bmp": "BMP 图像", "files.type.webp": "WebP 图像", "files.type.svg": "SVG 图像",
@@ -107,7 +107,7 @@ const en: Record<string, string> = {
   "files.resizePanels": "Drag to resize the panels (double-click to reset)",
   "files.hideNav": "Hide file list", "files.restoreNav": "Restore file list",
   "files.guideTitle": "Workspace files", "files.guideDescription": "Browse files in this session's workspace",
-  "files.refAdd": "Add ref to chat", "files.refCopy": "Copy ref", "files.refCopyText": "Copy ref + text", "files.refCopyContext": "Copy ref + context", "files.refCopied": "Copied", "files.copyFile": "Copy file", "files.copySelection": "Copy selection", "files.copyPath": "Copy path", "files.openLocal": "Open locally", "files.openFailed": "couldn't open the file on the desktop",
+  "files.refAdd": "Add ref to chat", "files.refCopy": "Copy ref", "files.refCopied": "Copied", "files.copyPath": "Copy path", "files.openLocal": "Open locally", "files.openFailed": "couldn't open the file on the desktop",
   "files.ageNow": "now", "files.ageMin": "{n}m", "files.ageHour": "{n}h", "files.ageDay": "{n}d",
   "files.type.png": "PNG image", "files.type.jpeg": "JPEG image", "files.type.gif": "GIF image",
   "files.type.bmp": "BMP image", "files.type.webp": "WebP image", "files.type.svg": "SVG image",
@@ -269,6 +269,50 @@ mdEngine.renderer.rules.link_open = (tokens, idx, options, env, self) => {
   }
   return mdLinkOpenDefault(tokens, idx, options, env, self);
 };
+// LINE ANNOTATION for the rendered preview: the ref resolvers need a point's
+// SOURCE line, and the renderer is the only place that knows it. Every
+// content block is stamped `data-line-start` = the 1-based source line its
+// text BEGINS on:
+//   p / h1-6    — the inner `inline` token carries the block's map;
+//   tr          — its own map (a GFM row is exactly one source line);
+//   fence       — the map begins at the opening delimiter, so the first
+//   code_block  — content line is one below (indented code: no delimiter).
+// Line breaks survive into the rendered text (a soft break is a literal \n
+// in the text, a hard break a <br>), so a point's line = data-line-start +
+// the breaks before it (mdLineBreaksBefore, over the live DOM). Containers
+// (ul/li/blockquote) are deliberately NOT stamped: their text is the leaf
+// blocks' text, and a line counted at a container boundary would skip the
+// blank lines between blocks.
+mdEngine.core.ruler.push("filestabLineAnnotate", (state) => {
+  const toks = state.tokens;
+  for (let i = 0; i < toks.length; i++) {
+    const tok = toks[i]!;
+    const prev = toks[i - 1];
+    if (tok.type === "inline" && tok.map) {
+      if (prev && !prev.hidden && (prev.type === "paragraph_open" || prev.type === "heading_open")) {
+        prev.attrSet("data-line-start", String(tok.map[0] + 1));
+      } else if (prev && prev.type === "paragraph_open" && prev.hidden &&
+        // A TIGHT list item: the renderer drops the (hidden) paragraph and
+        // the li IS the content block — stamp it, but only when the item is
+        // exactly this one paragraph (a nested block would make the li's
+        // textContent skip the blank lines between its blocks).
+        toks[i - 2]?.type === "list_item_open" &&
+        toks[i + 1]?.type === "paragraph_close" && toks[i + 1]?.hidden &&
+        toks[i + 2]?.type === "list_item_close") {
+        toks[i - 2]!.attrSet("data-line-start", String(tok.map[0] + 1));
+      }
+    } else if (tok.type === "tr_open" && tok.map) {
+      tok.attrSet("data-line-start", String(tok.map[0] + 1));
+    } else if (tok.type === "fence" && tok.map) {
+      // The token's attrs render onto <code> (the fence rule), which is the
+      // innermost wrapper of the code text — a fine counting root.
+      tok.attrSet("data-line-start", String(tok.map[0] + 2));
+    } else if (tok.type === "code_block" && tok.map) {
+      // The token's attrs render onto <pre> (the code_block rule).
+      tok.attrSet("data-line-start", String(tok.map[0] + 1));
+    }
+  }
+});
 function renderMarkdown(md: unknown): string {
   return mdEngine.render(String(md));
 }
@@ -532,6 +576,8 @@ function typeLabel(type: string | undefined, t: TFunc): string {
 //                                            markdown has no stable source
 //                                            line numbers → snippet anchor)
 //   path with a space      @"my dir/foo.ts":12-40  (dsh quoted-mention)
+//   External (outside the  /home/u/notes.md:12-40   (no `@`: that grammar is
+//    workspace)              /home/u/notes.md "…"    workspace-relative)
 // When a quoted snippet is present it follows the fragment, whitespace-
 // separated: `@path:12-40 "…text…"`.
 
@@ -561,13 +607,26 @@ interface RefInput {
   /** 1-based inclusive line range; absent → no fragment. */
   start?: number;
   end?: number;
+  /** 1-based column WITHIN the line (a click's exact point). Emitted as
+      `:line:col` — the universal file:line:col convention — only for a
+      single line with no quoted text: a range spans columns, and a quoted
+      single-line selection is already anchored by its text. */
+  col?: number;
   /** The commit under review (snapshot mode): `@rev` before the fragment. */
   rev?: string;
   /** The selected text (quoted after the fragment when non-blank). */
   text?: string;
+  /** An out-of-workspace (External) file: the path goes in verbatim, WITHOUT
+      the `@` mention. The `@` grammar is workspace-relative by dsh's
+      convention ("@-prefixed paths are files explicitly referenced, relative
+      to the workspace root"), so an outside file is referenced by its
+      absolute path alone — the agent's read tool takes absolute paths, and
+      dsh's file sandbox fences writes, never reads. A bare path needs no
+      quoting: there is no `@`-grammar to break on whitespace. */
+  bare?: boolean;
 }
 function buildFileRef(inp: RefInput): string {
-  let out = mentionOf(inp.path);
+  let out = inp.bare ? String(inp.path || "") : mentionOf(inp.path);
   // @rev applies to the ref as a whole (the file AND the quoted text are the
   // state at that commit) — but the caller must not pass it for old-side diff
   // lines, which belong to the commit's PARENT, not to it.
@@ -578,6 +637,9 @@ function buildFileRef(inp: RefInput): string {
     if (e < s) { const t = s; s = e; e = t; } // ranges can arrive out of order
     const nums = s === e ? String(s) : s + "-" + e;
     out += ":" + nums;
+    // A column belongs to a single line with no quoted text (the text is
+    // the anchor then); a range or a snippet never carries one.
+    if (s === e && typeof inp.col === "number" && inp.col >= 1 && !inp.text) out += ":" + inp.col;
   }
   // The selection quote: double quotes inside become single (the delimiters
   // must stay unambiguous), trimmed ends, capped with the ellipsis.
@@ -587,15 +649,6 @@ function buildFileRef(inp: RefInput): string {
     out += ' "' + body + '"';
   }
   return out;
-}
-
-// Label for the primary "copy the ref" action. Two shapes coexist: a
-// numbers ref with a separate "+ text" variant (the plain button stays
-// "Copy ref"), and a snippet-only ref (old side, rendered preview) whose
-// plain form ALREADY carries the line text — the button then says
-// "+ context" so the label is honest about what lands on the clipboard.
-function refCopyLabel(t: TFunc, hasTextVariant: boolean, context: boolean): string {
-  return hasTextVariant || !context ? t("files.refCopy") : t("files.refCopyContext");
 }
 
 // Char offsets at which each line begins (line 1 starts at 0). Used to map a
@@ -677,6 +730,112 @@ function lineOfOffset(offset: number, lineStarts: number[]): number {
   }
   return ans + 1;
 }
+// Line breaks BEFORE a point inside an annotated markdown block: a soft
+// break is a literal \n in a text node, a hard break a <br>. Counted over
+// the LIVE DOM (the point's own node contributes only up to its offset), so
+// it holds for soft-wrapped paragraphs and highlight-fragmented code alike.
+// node === root is the point at the block's start (0 breaks).
+// The renderer pretty-prints its HTML, so there are WHITESPACE-ONLY text
+// nodes between tags (e.g. the \n between a table row's <td>s) — those are
+// markup formatting, not source line breaks, and are skipped. The exception
+// is a code block (root is <pre>/<code>): there the text is verbatim, and a
+// whitespace-only node can be a real blank code line.
+function mdLineBreaksBefore(root: Element, node: Node, offset: number): number {
+  if (node === root) return 0;
+  const inCode = root.tagName === "PRE" || root.tagName === "CODE";
+  let breaks = 0;
+  const tw = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+  let cur = tw.nextNode();
+  while (cur) {
+    if (cur === node) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const t = (node as Text).data;
+        if (inCode || t.trim() !== "") {
+          for (let i = 0; i < offset && i < t.length; i++) if (t.charCodeAt(i) === 10) breaks++;
+        }
+      }
+      break;
+    }
+    if (cur.nodeType === Node.TEXT_NODE) {
+      const t = (cur as Text).data;
+      if (inCode || t.trim() !== "") {
+        for (let i = 0; i < t.length; i++) if (t.charCodeAt(i) === 10) breaks++;
+      }
+    } else if ((cur as Element).tagName === "BR") {
+      breaks++;
+    }
+    cur = tw.nextNode();
+  }
+  return breaks;
+}
+// The 1-based SOURCE line of a point in the rendered markdown, via the
+// renderer's data-line-start stamps (see the annotation rule). null when the
+// point has no annotated block (an unrendered spot) — the callers fall back
+// to the snippet anchor.
+function mdLineAtPoint(node: Node | null, offset: number): number | null {
+  if (!node) return null;
+  const anchor = node.nodeType === Node.TEXT_NODE
+    ? (node.parentElement || null)
+    : (node instanceof Element ? node : null);
+  const block = anchor ? anchor.closest("[data-line-start]") : null;
+  if (!block || !block.contains(node)) return null;
+  const start = Number(block.getAttribute("data-line-start"));
+  if (!Number.isInteger(start) || start < 1) return null;
+  return start + mdLineBreaksBefore(block, node, offset);
+}
+// One pass over an annotated markdown block: its full rendered text (text
+// nodes verbatim, <br> → \n; whitespace-only between-tag nodes skipped,
+// exactly as mdLineBreaksBefore) AND a point's position within it — the
+// breaks before it, its chars on the current line, its absolute char index.
+// The point may be the block element itself (the point at its start).
+// null when the point is not inside the block.
+function mdPointInBlock(block: Element, node: Node, offset: number): { text: string; breaksBefore: number; breaksTotal: number; charsThisLine: number; abs: number } | null {
+  if (!block.contains(node)) return null;
+  const inCode = block.tagName === "PRE" || block.tagName === "CODE";
+  let text = "";
+  let breaksBefore = 0;
+  let breaksTotal = 0;
+  let charsThisLine = 0;
+  let abs = 0;
+  let pointAbs = 0; // the point's absolute char index (captured AT the point)
+  let found = node === block; // the point at the block's start
+  const take = (t: string, count: boolean) => {
+    for (let i = 0; i < t.length; i++) {
+      if (t.charCodeAt(i) === 10) {
+        text += "\n"; breaksTotal++; abs++;
+        if (count) { breaksBefore++; charsThisLine = 0; }
+      } else {
+        text += t.charAt(i); abs++;
+        if (count) charsThisLine++;
+      }
+    }
+  };
+  const tw = document.createTreeWalker(block, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+  let cur = tw.nextNode();
+  while (cur) {
+    if (cur === node) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const t = (node as Text).data;
+        const upto = Math.min(offset, t.length);
+        if (inCode || t.trim() !== "") {
+          take(t.slice(0, upto), true); // up to the point: counted
+          pointAbs = abs; // the point's absolute position
+          take(t.slice(upto), false); // the rest of THIS node: still part of the block text
+        }
+      } else {
+        pointAbs = abs;
+      }
+      found = true; // keep walking: the rest of the block is still collected (uncounted)
+    } else if (cur.nodeType === Node.TEXT_NODE) {
+      const t = (cur as Text).data;
+      if (inCode || t.trim() !== "") take(t, false);
+    } else if ((cur as Element).tagName === "BR") {
+      text += "\n"; breaksTotal++; abs++;
+    }
+    cur = tw.nextNode();
+  }
+  return found ? { text, breaksBefore, breaksTotal, charsThisLine, abs: pointAbs } : null;
+}
 // The 1-based inclusive line range a live selection spans inside a <pre>.
 // null when there is no usable text selection (collapsed, element-anchored —
 // browsers report element anchors for whole-node selections, the offset math
@@ -751,6 +910,10 @@ type VcsInfo = {
   message?: string;
 };
 type DirEntry = { name: string; path: string; isDirectory: boolean; size?: number; mtime?: number };
+/** The tick's per-dir slot: a fresh listing, or the dir-level failure the
+    list endpoint would have reported (parallel to the request's `dirs`). */
+type TickListing = (Listing & { vcs?: VcsInfo }) | { error: string; relPath: string };
+type TickResponse = { openFile: "same" | "changed"; list: "same" | { listings: TickListing[] } };
 type DiffBinarySide = { kind: string; size?: number; type?: string; label?: string; data?: string };
 type DiffBinary = { new: DiffBinarySide | null; old: DiffBinarySide | null };
 
@@ -1293,10 +1456,10 @@ function DiffView(props: DiffViewProps) {
   }, []);
   const gridRef = React.useRef<HTMLDivElement>(null);
   const spacerRef = React.useRef<HTMLDivElement>(null);
-  // The code resets scroll only when the file or review base changes. The
-  // 5 s poll refreshes the same view with a fresh model object (the reader
-  // is mid-diff). A reset keyed on model identity yanks the view to the top
-  // every cycle.
+  // The code resets scroll only when the file or review base changes. A
+  // tick that changed the listing refreshes the same view with a fresh
+  // model object (the reader is mid-diff). A reset keyed on model identity
+  // yanks the view to the top on every such refresh.
   const fileKey = (props.baseLabel ? props.baseLabel + "\u0000" : "") + realPathOf(model);
   const lastFileRef = React.useRef(fileKey);
   React.useEffect(() => {
@@ -1455,15 +1618,39 @@ function renderKindOf(name: string | null): "markdown" | "html" | null {
   const n = String(name || "");
   return MD_RE.test(n) ? "markdown" : HTML_RE.test(n) ? "html" : null;
 }
-// "auto" (a new selection or new commit resets to this) picks diff for a
-// diffable file, preview for markdown (safe by default: renderMarkdown is
-// our own escape-first renderer, no script execution), the RAW view for
-// HTML (rendering executes its scripts, an explicit opt-in), and view for
-// everything else. A pinned "diff" falls back to view when the file is no
-// longer diffable.
-function resolvePaneMode(mode: string, diffable: boolean, name: string | null): string {
+// ── Soft-sticky diff preference ──────────────────────────────────────────
+// An explicit Diff pick in the view bar ARMS the preference for the
+// session (below); a subsequently selected file — or the same file at a
+// new commit — then starts in Diff mode. It is "soft": session-scoped and
+// in-memory only, never persisted, so a page reload starts un-armed. What
+// disarms it: an explicit View/Preview pick (the last explicit choice
+// wins), the surface's session changing, or the surface closing (the
+// unmount cleanups in FilesView / PreviewPane). Transient resource frames
+// (a file chip's redirect) close themselves as part of OPENING a file,
+// not as the user closing filestab, so their unmounts do not disarm.
+// Session-tagged: two files surfaces of different sessions can be open at
+// once, and one surface's choices must not leak into the other's.
+let stickyDiffSession: string | null = null;
+function stickyDiffArm(sessionId: string | null): void {
+  if (sessionId !== null) stickyDiffSession = sessionId;
+}
+function stickyDiffClear(sessionId: string | null): void {
+  if (stickyDiffSession === sessionId) stickyDiffSession = null;
+}
+function stickyDiffArmed(sessionId: string | null): boolean {
+  return sessionId !== null && stickyDiffSession === sessionId;
+}
+// "auto" (the fresh-selection reset, below) never picks diff: a newly
+// selected file opens as its CONTENT — preview for markdown (safe by
+// default: renderMarkdown is our own escape-first renderer, no script
+// execution), the RAW view for HTML (rendering executes its scripts, an
+// explicit opt-in), and view for everything else. The single exception is
+// a diffable file with no content at the selected base (a deletion): the
+// diff IS its only view. An explicit "diff" (the armed preference or a
+// pinned toggle pick) falls back to view when the file is not diffable.
+function resolvePaneMode(mode: string, diffable: boolean, name: string | null, noContent: boolean = false): string {
   if (mode === "auto") {
-    if (diffable) return "diff";
+    if (diffable && noContent) return "diff";
     return renderKindOf(name) === "markdown" ? "preview" : "view";
   }
   if (mode === "diff" && !diffable) return "view";
@@ -1576,6 +1763,9 @@ interface PreviewPaneProps {
       path. Set: this pane shows that file (view/preview only — no diff, no
       section refs), read through readAtAbs. Mutually exclusive with relPath. */
   absPath?: string | null;
+  /** The slot's session: scopes the soft-sticky diff preference (a Diff
+      pick arms it for THIS session only; see the sticky block above). */
+  sessionId: string | null;
   /** The host's absolute workspace root (every listing carries it). The loopback-only "copy path" action builds the absolute path from it. */
   wsRoot?: string | null;
   /** dsh's native-open capability probe (BUG-005): the deployment can reach a native desktop. */
@@ -1584,6 +1774,9 @@ interface PreviewPaneProps {
   base: string;
   rev: string | null;
   changesetKnown: boolean;
+  /** Content-refresh epoch (worktree mode): a bump means the host's tick
+      saw the open file's on-disk stat change — re-fetch its bytes. */
+  contentEpoch: number;
   readAt: (relPath: string, rev: string, signal: AbortSignal) => Promise<FileShowValue>;
   /** The External section's read: a live file by absolute path (fileshow-abs). Absent in a minimal profile. */
   readAtAbs?: ((path: string, signal: AbortSignal) => Promise<FileShowValue>) | null;
@@ -1753,27 +1946,51 @@ function copyRefText(text: string): void {
 // this tiny leaf only, never the file panes. The trailing space lets the
 // user keep typing; a leading space is inserted only when the draft does not
 // already end in whitespace.
+// The COMMIT of a ref into the chat, as one action:
+//   1. DEDUPE — a click that would append what the draft already ends with
+//      is a no-op (a double-click is not a double-insert).
+//   2. APPEND — a separating space when the draft doesn't already end in
+//      whitespace, and the TRAILING space is functional: every editor commit
+//      runs dsh's input triggers, and the space keeps the @-completion menu
+//      from opening on the inserted token.
+//   3. FOCUS — fullscreen: the right bar IS the window and the composer is
+//      mounted but covered, so the window goes back through the host's own
+//      exit control first (the layout face is a report seat and cannot drive
+//      the mode), then the composer takes the caret. `setDraft` already put
+//      it after the insertion (its selectEnd), the focus makes it visible.
+function commitRefToChat(draft: string, refText: string, setDraft: (text: string) => void): void {
+  const insertion = refText + " ";
+  if (draft.endsWith(insertion)) return; // already there
+  const sep = draft && !/\s$/.test(draft) ? " " : "";
+  if (typeof document !== "undefined") {
+    const exit = document.querySelector('[data-sidebar-right-panel="fullscreen"] [data-sidebar-right-mode="push"]');
+    if (exit instanceof HTMLElement) exit.click();
+  }
+  setDraft(draft + sep + insertion);
+  if (typeof document !== "undefined") {
+    const composer = document.querySelector("[data-composer-input]");
+    if (composer instanceof HTMLElement) composer.focus();
+  }
+}
+
 function AddToChatBtn(props: {
   refText: string;
   useInput: ((sel: (s: { draft: string }) => string) => string) | null;
   inputActions: { setDraft(text: string): void };
   t: TFunc;
-  /** Row styling (the pane toolbar vs the context menu). */
+  /** Row styling (the head row's icon cluster). */
   className?: string;
-  /** Close the host (the context menu) after the append lands. */
-  onDone?: () => void;
+  /** Icon-only (the head row): the tooltip/aria-label carries the label. */
+  iconOnly?: boolean;
 }): React.ReactElement {
   const { t } = props;
   const draft = props.useInput ? props.useInput((s) => s.draft) : "";
-  const onClick = () => {
-    const sep = draft && !/\s$/.test(draft) ? " " : "";
-    props.inputActions.setDraft(draft + sep + props.refText + " ");
-    if (props.onDone) props.onDone();
-  };
+  const onClick = () => { commitRefToChat(draft, props.refText, (text) => props.inputActions.setDraft(text)); };
   return (
-    <button type="button" className={props.className || "dswFiles_refBtn"} title={props.refText}
+    <button type="button" className={props.className || "dswFiles_refBtn"}
+      title={t("files.refAdd")} aria-label={t("files.refAdd")}
       onMouseDown={(e) => e.preventDefault()} onClick={onClick}>
-      {Icon("IconPlus16", { size: 14 }, "+")} {t("files.refAdd")}
+      {Icon("IconPlus16", { size: 14 }, "+")}{props.iconOnly ? null : " " + t("files.refAdd")}
     </button>
   );
 }
@@ -1791,12 +2008,11 @@ function PreviewPane(props: PreviewPaneProps) {
   const [diffSt, setDiffSt] = React.useState<DiffState>({ status: "idle", for: null });
   // The last patch actually shown, per file. A background refresh that comes
   // back UNCHANGED must not touch state (no re-render, no scroll jump).
-  // Otherwise the 5 s poll makes the open diff visibly "refresh" every few
-  // seconds.
+  // Otherwise a live-change tick makes the open diff visibly "refresh".
   const lastPatchRef = React.useRef<{ base: string; patch: string } | null>(null);
   // The binary payload (old|new bytes), kept per (file, base). The first
-  // fetch requests it. Later polls pass noBinary — without the flag, a
-  // 1 MB image's base64 re-crosses the wire every poll. Committed bytes
+  // fetch requests it. Later fetches pass noBinary — without the flag, a
+  // 1 MB image's base64 re-crosses the wire on every refresh. Committed bytes
   // are history-stable; a worktree/commit edit shows up as a changed
   // patch, which drops the cache (see the fetch handler below).
   const binaryRef = React.useRef<{ key: string; binary: DiffBinary } | null>(null);
@@ -1804,9 +2020,9 @@ function PreviewPane(props: PreviewPaneProps) {
   // Diffable: worktree mode = a non-conflict change at a diffable base (a
   // conflict-only file has no worktree diff). Snapshot mode = the commit
   // CHANGED the file. While the changeset is still unknown (its load is
-  // pending), the code treats every file as diffable. A changed file's diff
-  // then never flashes a preview first. (resolvePaneMode holds the mode
-  // reset/pin rules.)
+  // pending), the code treats every file as diffable. (resolvePaneMode
+  // holds the mode default/fallback rules; the sticky arm below decides
+  // whether a fresh selection starts in diff at all.)
   const isRev = props.base !== "worktree";
   // An External (out-of-workspace) file has no VCS status and no base: the
   // pane offers view/preview modes only — never a diff.
@@ -1814,9 +2030,16 @@ function PreviewPane(props: PreviewPaneProps) {
   const diffable = !external && (isRev && props.changesetKnown === false
     ? !!props.fetchDiff
     : !!(props.status && props.status.base !== "conflict" && props.fetchDiff));
-  const [mode, setMode] = React.useState("auto");
-  React.useEffect(() => { setMode("auto"); }, [props.relPath, props.absPath, props.base]);
-  const effectiveMode = resolvePaneMode(mode, diffable, props.name);
+  // A fresh selection (or a commit-base change) starts at the soft-sticky
+  // preference when armed for this session — "diff" — else "auto" (content:
+  // preview/view, never diff). The initializer runs at mount; the effect
+  // covers selections on a pane that is already mounted.
+  const [mode, setMode] = React.useState(() => stickyDiffArmed(props.sessionId) ? "diff" : "auto");
+  React.useEffect(() => { setMode(stickyDiffArmed(props.sessionId) ? "diff" : "auto"); }, [props.relPath, props.absPath, props.base]);
+  // A deletion has no content at the selected base (worktree or the commit):
+  // the diff is its only view, so the content-default falls back to it.
+  const noContent = !!(props.status && props.status.status === "D");
+  const effectiveMode = resolvePaneMode(mode, diffable, props.name, noContent);
   // The content pane's presentation while a DIFF owns the view. The "no
   // changes in this commit" fall-through shows the file in its own default
   // presentation, not as "diff".
@@ -1844,15 +2067,16 @@ function PreviewPane(props: PreviewPaneProps) {
     });
   };
 
-  // The diff fetch, only while the diff view is live for this file. The 5 s
-  // poll hands us a FRESH status object every cycle, so this re-runs every
-  // cycle. It must stay invisible when nothing changed: no loading flash,
-  // no state update for a byte-identical patch.
+  // The diff fetch, only while the diff view is live for this file. A tick
+  // that changed the listing hands us a FRESH status object, so this
+  // re-runs on real changes (and on a file/base switch). It must stay
+  // invisible when the bytes didn't change: no loading flash, no state
+  // update for a byte-identical patch.
   React.useEffect(() => {
     if (!diffable || !props.relPath || effectiveMode !== "diff") { setDiffSt({ status: "idle", for: null }); lastPatchRef.current = null; binaryRef.current = null; return; }
     const seq = ++diffSeq.current;
     const c = new AbortController();
-    // Same file AND same base = the same view (the 5 s poll's refresh). A
+    // Same file AND same base = the same view (a live-change refresh). A
     // base switch (commit → worktree, commit → commit) is a NEW view even
     // for the same file: allow the loading note + full scroll reset.
     const sameFile = diffSt.for === props.relPath && diffSt.base === props.base;
@@ -1867,10 +2091,11 @@ function PreviewPane(props: PreviewPaneProps) {
       } else if (sameFile && lastPatchRef.current
           && lastPatchRef.current.base === props.base
           && lastPatchRef.current.patch !== v.patch) {
-        // This poll went out noBinary (a warm cache) and came back with a
+        // This fetch went out noBinary (a warm cache) and came back with a
         // CHANGED patch: the worktree/commit bytes the cache holds may be
-        // stale (a live edit). Drop them — the next poll's cold cache
-        // re-fetches with bytes (≤5 s of card, then the fresh images).
+        // stale (a live edit). Drop them — the next cold fetch re-reads
+        // with bytes (BUG-015: that comes on the next change or a mode
+        // re-toggle, not a bounded interval).
         binaryRef.current = null;
       }
       const binary = binaryRef.current && binaryRef.current.key === props.relPath + "@" + props.base ? binaryRef.current.binary : null;
@@ -1938,8 +2163,10 @@ function PreviewPane(props: PreviewPaneProps) {
     // st), so a flip must not re-fetch. Flips into or out of the diff view
     // always change diffSt.status, which re-runs this effect. readAtAbs is
     // not a dep (the parent recreates the closure every render, as above).
+    // contentEpoch: the host's tick saw the open file's stat change — the
+    // bytes changed, so no byte-identical guard; quiet ticks bump nothing.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.relPath, props.absPath, props.rev, isSnapshot, diffSt.status]);
+  }, [props.relPath, props.absPath, props.rev, isSnapshot, diffSt.status, props.contentEpoch]);
 
   // Local images in the markdown preview. A document-relative src cannot
   // load (no HTTP file route: the workspace is not a web root), so for a
@@ -2102,27 +2329,36 @@ function PreviewPane(props: PreviewPaneProps) {
               </div>
             : previewBody;
 
-  // ---- Section ref: selection in this pane → a short @path ref the user
-  // can append to the chat prompt (or copy). See the builder at the top of
-  // the file for the exact shapes. Recomputed on selectionchange (rAF-
-  // throttled) and whenever the pane's content or mode changes. null = no
-  // usable selection (collapsed, outside this pane, or binary card).
-  const [selRef, setSelRef] = React.useState<{ plain: string; withText: string; context: boolean } | null>(null);
+  // ---- Section ref: a click or selection in this pane → the short ref the
+  // user appends to the chat prompt (or copies). See the builder at the top
+  // of the file for the exact shapes. ONE ref, determined by the gesture:
+  //   selRef    — the LIVE text selection (selectionchange, rAF-throttled):
+  //               ALWAYS carries the selected text (the snippet is the ref's
+  //               payload when the view has no stable line numbers);
+  //   clickRef  — a single click: NO selection, so no text — the line's
+  //               number ref, or the snippet-only anchor where the view has
+  //               no line numbers (old-side diff lines, rendered markdown).
+  // The head row shows `selRef ?? clickRef`: a selection always wins, and a
+  // click that lands off text clears the click ref back to the plain path.
+  // null = no usable ref (collapsed, outside this pane, or binary card).
+  const [selRef, setSelRef] = React.useState<string | null>(null);
+  const [clickRef, setClickRef] = React.useState<string | null>(null);
   const [refCopied, setRefCopied] = React.useState(false);
   const refCopyTimer = React.useRef(0);
   const lineStartsRef = React.useRef<number[]>([]);
   React.useEffect(() => { lineStartsRef.current = lineStartsOf(st.text || ""); }, [st.text]);
-  // Selection → ref. Shared by the selectionchange effect (the pane toolbar)
-  // and the context-menu handler (right-click on a live selection), so both
-  // surfaces always agree. `context` = the plain ref already carries the
-  // snippet (old-side lines, rendered markdown) — the copy button labels
-  // that "Copy ref + context" instead of a bare "Copy ref".
-  const computeSelRef = (): { plain: string; withText: string; context: boolean } | null => {
+  // Selection → ref, ALWAYS with the selected text (the rule: a selection
+  // is a ref plus its text; where the view has no line numbers the snippet
+  // is the ref's anchor). `path` is the workspace relPath, or the External
+  // file's ABSOLUTE path verbatim (bare: no `@` — that grammar is
+  // workspace-relative, see buildFileRef).
+  const computeSelRef = (): string | null => {
     const root = bodyRef.current;
     const sel = typeof window === "undefined" ? null : window.getSelection();
-    if (!root || !props.relPath || !sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+    const path = props.relPath || props.absPath;
+    const bare = !props.relPath && !!props.absPath;
+    if (!root || !path || !sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
     if (!root.contains(sel.anchorNode)) return null;
-    const path = props.relPath;
     const rev = isRev ? props.base : undefined;
     const text = String(sel);
     if (mineDiff && diffSt.status === "diff" && diffSt.file) {
@@ -2131,27 +2367,29 @@ function PreviewPane(props: PreviewPaneProps) {
       // current-file numbers → snippet anchor only, no rev (the lines
       // belong to the commit's parent).
       const nw = diffSelRange(root, "data-dn");
-      if (nw) {
-        return { plain: buildFileRef({ path, start: nw.min, end: nw.max, rev }), withText: buildFileRef({ path, start: nw.min, end: nw.max, rev, text: nw.text }), context: false };
-      }
+      if (nw) return buildFileRef({ path, start: nw.min, end: nw.max, rev, text: nw.text, bare });
       const od = diffSelRange(root, "data-dl");
-      if (od) { const s = buildFileRef({ path, text: od.text }); return { plain: s, withText: s, context: (od.text || "").trim() !== "" }; }
+      if (od) return buildFileRef({ path, text: od.text, bare });
       return null;
     }
     if (effectiveMode === "preview" && renderKindOf(props.name) === "markdown") {
-      // Rendered markdown has no stable source line numbers → snippet.
       if (!text.trim()) return null;
-      const s = buildFileRef({ path, rev, text });
-      return { plain: s, withText: s, context: true };
+      // The renderer stamps the content blocks with their source line
+      // (data-line-start): resolve each range end to a line, and fall back
+      // to the snippet anchor when either end has no annotated block.
+      const range = sel.getRangeAt(0);
+      const sLine = mdLineAtPoint(range.startContainer, range.startOffset);
+      const eLine = mdLineAtPoint(range.endContainer, range.endOffset);
+      if (sLine && eLine) {
+        return buildFileRef({ path, start: Math.min(sLine, eLine), end: Math.max(sLine, eLine), rev, text, bare });
+      }
+      return buildFileRef({ path, rev, text, bare });
     }
     // Raw view: map the selection onto the pre's char offsets.
     const pre = root.querySelector("pre.dswFiles_previewText") as HTMLElement | null;
     const lr = pre ? viewSelRange(pre, lineStartsRef.current) : null;
-    if (lr) {
-      return { plain: buildFileRef({ path, start: lr.start, end: lr.end, rev }), withText: buildFileRef({ path, start: lr.start, end: lr.end, rev, text }), context: false };
-    }
-    const s = buildFileRef({ path, text });
-    return { plain: s, withText: s, context: text.trim() !== "" };
+    if (lr) return buildFileRef({ path, start: lr.start, end: lr.end, rev, text, bare });
+    return buildFileRef({ path, text, bare });
   };
   React.useEffect(() => {
     let raf = 0;
@@ -2159,7 +2397,7 @@ function PreviewPane(props: PreviewPaneProps) {
     document.addEventListener("selectionchange", onSel);
     onSel();
     return () => { document.removeEventListener("selectionchange", onSel); if (raf) cancelAnimationFrame(raf); };
-  }, [props.relPath, props.base, props.name, effectiveMode, mineDiff, diffSt.status, diffSt.file, st.status, st.text]);
+  }, [props.relPath, props.absPath, props.base, props.name, effectiveMode, mineDiff, diffSt.status, diffSt.file, st.status, st.text]);
 
   const copyRef = (text: string): void => {
     copyRefText(text);
@@ -2169,75 +2407,21 @@ function PreviewPane(props: PreviewPaneProps) {
   };
   React.useEffect(() => () => window.clearTimeout(refCopyTimer.current), []);
 
-  // ---- Right-click context menu ----
-  // Web content CANNOT extend the browser's native context menu (there is no
-  // platform API for it), so the standard pattern is preventDefault + a
-  // custom DOM menu. The interception is deliberately narrow: a right-click
-  // resolves to a menu only when it lands on (a) a live selection in this
-  // pane (the menu carries the selection's ref) or (b) a resolvable line
-  // (a diff cell/gutter, a preview block, or a text position in the view
-  // pre). Everything else (the toggle row, grid gaps, a deleted line with
-  // no text) shows the native menu unchanged.
-  // selText: the live selection's raw text, when the menu was opened on a
-  // selection (the "Copy selection" item); null for a plain line right-click
-  // (then the "Copy file" item offers the whole file text instead, when the
-  // text is loaded — the diff view skips the text fetch, so not always).
-  // external: an External file's menu — the head shows its absolute path
-  // and the section-ref items are dropped (refs are workspace-scoped); the
-  // copy actions remain.
-  const [ctxRef, setCtxRef] = React.useState<{ x: number; y: number; plain: string; withText: string | null; context: boolean; selText: string | null; external?: boolean } | null>(null);
-  React.useEffect(() => {
-    if (!ctxRef) return;
-    const close = (): void => setCtxRef(null);
-    const onDown = (ev: MouseEvent): void => {
-      const t = ev.target as Element | null;
-      if (t && t.closest && t.closest(".dswFiles_ctxMenu")) return; // item clicks close via their own handler
-      close();
-    };
-    const onKey = (ev: KeyboardEvent): void => { if (ev.key === "Escape") close(); };
-    const onScroll = (): void => close();
-    document.addEventListener("mousedown", onDown, true);
-    document.addEventListener("keydown", onKey, true);
-    window.addEventListener("resize", onScroll);
-    window.addEventListener("scroll", onScroll, true);
-    return () => {
-      document.removeEventListener("mousedown", onDown, true);
-      document.removeEventListener("keydown", onKey, true);
-      window.removeEventListener("resize", onScroll);
-      window.removeEventListener("scroll", onScroll, true);
-    };
-  }, [ctxRef]);
-  const onPreviewContextMenu = (e: React.MouseEvent<HTMLDivElement>): void => {
+  // ---- Click → ref (replaces the old right-click context menu) ----
+  // A SINGLE click on source text resolves to that line's (or block's) ref,
+  // shown in the head row above; a drag is left to the native selection
+  // (computeSelRef). The native browser context menu is untouched — we no
+  // longer intercept right-clicks at all. Interactive targets resolve to
+  // nothing: their own click behavior wins (a markdown link opens its
+  // target, a task-list checkbox toggles, an iframe owns its own clicks).
+  const resolveClickRef = (e: { clientX: number; clientY: number; target: unknown }): string | null => {
     const root = bodyRef.current;
-    const sel = typeof window === "undefined" ? null : window.getSelection();
-    if (!root) return;
-    // An External file: no section refs (they are workspace-scoped) — the
-    // head shows the absolute path, and the menu keeps the copy actions
-    // (a live selection's text when the menu was opened on one).
-    if (external) {
-      const selLive = sel && sel.rangeCount > 0 && !sel.isCollapsed && root.contains(sel.anchorNode) ? String(sel) : null;
-      e.preventDefault();
-      setCtxRef({ x: e.clientX, y: e.clientY, plain: props.absPath!, withText: null, context: false, selText: selLive, external: true });
-      return;
-    }
-    // Past the external branch this is a workspace file: the ref-building
-    // below assumes a relPath.
-    if (!props.relPath) return;
-    // A live selection in this pane: the menu carries the SELECTION's ref.
-    // (A right-click inside the selection preserves it; a right-click
-    // OUTSIDE it collapses the selection on mousedown — browser behavior —
-    // so that case degrades naturally to the plain line ref below.)
-    if (sel && sel.rangeCount > 0 && !sel.isCollapsed && root.contains(sel.anchorNode)) {
-      const sr = computeSelRef();
-      if (sr) {
-        e.preventDefault();
-        setCtxRef({ x: e.clientX, y: e.clientY, plain: sr.plain, withText: sr.withText !== sr.plain ? sr.withText : null, context: sr.context, selText: String(sel) });
-      }
-      return;
-    }
-    const path = props.relPath;
-    const rev = isRev ? props.base : undefined;
     const target = e.target instanceof Element ? e.target : null;
+    const path = props.relPath || props.absPath;
+    const bare = !props.relPath && !!props.absPath;
+    if (!root || !path) return null;
+    if (target && target.closest("a,button,input,textarea,select,svg,iframe,[contenteditable]")) return null;
+    const rev = isRev ? props.base : undefined;
     // Diff: the cell OR gutter under the pointer carries the line number(s).
     // The new side wins (its lines exist in the worktree / at the rev).
     if (mineDiff && diffSt.status === "diff" && target) {
@@ -2253,49 +2437,66 @@ function PreviewPane(props: PreviewPaneProps) {
           if (mt && text.startsWith(mt)) text = text.slice(mt.length).trim();
         }
         if (Number.isFinite(dn) && dn >= 1) {
-          e.preventDefault();
-          setCtxRef({ x: e.clientX, y: e.clientY, plain: buildFileRef({ path, start: dn, rev }), withText: text ? buildFileRef({ path, start: dn, rev, text }) : null, context: false, selText: null });
-          return;
+          // A click is no selection → no text: the line's number ref.
+          return buildFileRef({ path, start: dn, rev, bare });
         }
         if (Number.isFinite(dl) && dl >= 1) {
-          if (!text) return; // deleted line with no text: nothing to anchor
-          const plain = buildFileRef({ path, text });
-          e.preventDefault();
+          if (!text) return null; // deleted line with no text: nothing to anchor
           // Old side: the numbers belong to the base revision, so the ref
-          // carries the line text as its anchor — label it accordingly.
-          setCtxRef({ x: e.clientX, y: e.clientY, plain, withText: null, context: true, selText: null });
-          return;
+          // carries the line text as its anchor (snippet-only shape — the
+          // only anchor this line has).
+          return buildFileRef({ path, text, bare });
         }
-        return;
+        return null;
       }
     }
-    // Rendered markdown preview: the rendered DOM has no stable mapping to
-    // source lines (the renderer transforms structure), so a right-click
-    // anchors the ref to the clicked BLOCK's text — snippet-only, the same
-    // policy as old-side diff lines. HTML previews are sandboxed iframes
-    // with their own document; their context menus are out of scope.
+    // Rendered markdown preview: the renderer stamps each content block with
+    // its source line (data-line-start), so a click resolves to the LINE via
+    // the caret point. The COLUMN is emitted only when the block's rendered
+    // text is byte-identical to its source lines — plain paragraphs and code
+    // fences map 1:1, but stripped markup (#, *, -, |, [ ]) shifts rendered
+    // columns off the source, and a wrong number is worse than none. HTML
+    // previews are sandboxed iframes with their own document; their clicks
+    // never reach this handler.
     if (effectiveMode === "preview" && renderKindOf(props.name) === "markdown") {
       const md = root.querySelector("div.dswFiles_previewMarkdown");
       if (md && target && md.contains(target)) {
-        const BLOCK = "p,li,h1,h2,h3,h4,h5,h6,pre,blockquote,td,th,dt,dd";
-        let block: Element | null = target.closest(BLOCK);
-        if (!block || block === md) {
-          // Whitespace or container padding: resolve through the caret point.
-          const doc = document as Document & { caretRangeFromPoint?: (x: number, y: number) => Range | null };
-          const r = doc.caretRangeFromPoint ? doc.caretRangeFromPoint(e.clientX, e.clientY) : null;
-          const n = r && r.startContainer ? (r.startContainer.nodeType === Node.TEXT_NODE ? r.startContainer.parentElement : r.startContainer) : null;
-          if (n instanceof Element) block = n.closest(BLOCK);
-        }
-        if (block && block !== md) {
-          const text = (block.textContent || "").trim();
-          if (text) {
-            e.preventDefault();
-            const s = buildFileRef({ path, rev, text });
-            setCtxRef({ x: e.clientX, y: e.clientY, plain: s, withText: null, context: true, selText: null });
+        const doc = document as Document & { caretRangeFromPoint?: (x: number, y: number) => Range | null };
+        const r = doc.caretRangeFromPoint ? doc.caretRangeFromPoint(e.clientX, e.clientY) : null;
+        const n = r ? r.startContainer : null;
+        const anchor = n ? (n.nodeType === Node.TEXT_NODE ? (n.parentElement || null) : (n instanceof Element ? n : null)) : null;
+        const block = anchor ? anchor.closest("[data-line-start]") : null;
+        if (block && n && block.contains(n)) {
+          const stamp = Number(block.getAttribute("data-line-start"));
+          const pt = mdPointInBlock(block, n, r ? r.startOffset : 0);
+          if (Number.isInteger(stamp) && stamp >= 1 && pt) {
+            let col: number | undefined;
+            const src = st.text || "";
+            const ls = lineStartsRef.current;
+            if (stamp <= ls.length) {
+              const endLine = stamp + pt.breaksTotal;
+              const seg = src.slice(ls[stamp - 1]!, endLine < ls.length ? ls[endLine]! : src.length);
+              const norm = (s: string) => s.replace(/\n+$/, "");
+              const a = norm(pt.text);
+              if (a === norm(seg) && pt.abs <= a.length) col = pt.charsThisLine + 1;
+            }
+            return buildFileRef({ path, start: stamp + pt.breaksBefore, col, rev, bare });
           }
         }
+        // Fallback: the clicked block's text as the anchor (no annotated
+        // block under the point — the snippet-only shape, as old-side diffs).
+        const BLOCK = "p,li,h1,h2,h3,h4,h5,h6,pre,blockquote,td,th,dt,dd";
+        let snipBlock: Element | null = target.closest(BLOCK);
+        if (!snipBlock || snipBlock === md) {
+          const snipN = r && r.startContainer ? (r.startContainer.nodeType === Node.TEXT_NODE ? r.startContainer.parentElement : r.startContainer) : null;
+          if (snipN instanceof Element) snipBlock = snipN.closest(BLOCK);
+        }
+        if (snipBlock && snipBlock !== md) {
+          const text = (snipBlock.textContent || "").trim();
+          if (text) return buildFileRef({ path, rev, text, bare });
+        }
       }
-      return;
+      return null;
     }
     // Raw view: the caret position under the pointer → char offset → line.
     const pre = root.querySelector("pre.dswFiles_previewText") as HTMLElement | null;
@@ -2311,123 +2512,103 @@ function PreviewPane(props: PreviewPaneProps) {
       if (c && c.nodeType === Node.TEXT_NODE && pre.contains(c)) {
         const o = textNodeOffset(pre, c as Text, off);
         if (o >= 0) {
-          const line = lineOfOffset(o, lineStartsRef.current);
+          // A click is no selection → no text: the line's number ref, with
+          // the COLUMN (the raw view maps 1:1 onto the source, so the
+          // offset is exact).
           const ls = lineStartsRef.current;
-          const s = ls[line - 1]!;
-          const en = line < ls.length ? ls[line]! : (st.text || "").length;
-          const lineText = (st.text || "").slice(s, en);
-          e.preventDefault();
-          setCtxRef({ x: e.clientX, y: e.clientY, plain: buildFileRef({ path, start: line, rev }), withText: lineText.trim() ? buildFileRef({ path, start: line, rev, text: lineText }) : null, context: false, selText: null });
+          const line = lineOfOffset(o, ls);
+          return buildFileRef({ path, start: line, col: o - (ls[line - 1] ?? 0) + 1, rev, bare });
         }
       }
     }
+    return null;
   };
-  // The menu is a sibling of the content inside the pane root, so no
-  // ancestor transform (the diff grid's) can move it. The click point is
-  // re-expressed relative to the root; the clamp keeps it on-screen.
-  const ctxMenu = ctxRef && bodyRef.current
-    ? (() => {
-        const r = bodyRef.current!.getBoundingClientRect();
-        const left = Math.max(0, Math.min(ctxRef.x - r.left, r.width - 220));
-        const top = Math.max(0, Math.min(ctxRef.y - r.top, r.height - 150));
-        return <div className="dswFiles_ctxMenu" role="menu" style={{ left, top }}>
-          <div className="dswFiles_ctxHead" title={ctxRef.plain}>{ctxRef.plain.length > 52 ? ctxRef.plain.slice(0, 52) + "…" : ctxRef.plain}</div>
-          {/* The ref copy is workspace-scoped: an External file's menu keeps
-              its path head and the plain copy actions. */}
-          {!ctxRef.external
-            ? <button type="button" role="menuitem" className="dswFiles_ctxItem" title={ctxRef.plain}
-              onClick={() => { copyRef(ctxRef.plain); setCtxRef(null); }}>
-              {Icon("IconCopyOutline16", { size: 14 }, "⧉")} {refCopyLabel(t, !!ctxRef.withText, ctxRef.context)}
-            </button>
+  // Click (no drag) bookkeeping: a primary mousedown/mouseup pair that
+  // travels ≤4 px is a click; anything longer is a drag-selection, which
+  // computeSelRef owns. The head row's own buttons swallow their clicks.
+  const downAt = React.useRef<{ x: number; y: number } | null>(null);
+  const onBodyMouseDown = (e: React.MouseEvent): void => {
+    if (e.button === 0) downAt.current = { x: e.clientX, y: e.clientY };
+  };
+  const onBodyMouseUp = (e: React.MouseEvent): void => {
+    const d = downAt.current;
+    downAt.current = null;
+    if (e.button !== 0 || !d) return;
+    if (Math.abs(e.clientX - d.x) > 4 || Math.abs(e.clientY - d.y) > 4) return; // a drag
+    const el = e.target instanceof Element ? e.target : null;
+    if (el && el.closest(".dswFiles_paneHead")) return; // the head row's buttons
+    setClickRef(resolveClickRef(e));
+  };
+  // A ref is only valid for the content it was resolved against: switch the
+  // file, the commit base, or the presentation mode and the clicked line no
+  // longer points at the same thing.
+  React.useEffect(() => { setClickRef(null); }, [props.relPath, props.absPath, props.base, effectiveMode, mineDiff]);
+  // ---- The head row: the file's ref surface (replaces the old context
+  // menu's ref items and the view bar's refTools) ----
+  // At rest it shows the file's path (workspace-relative, or the External
+  // file's absolute path) — dim directory, full-ink name, the nav rows'
+  // vocabulary. A click or selection on source text morphs it into the
+  // EXACT pasteable ref token (monospace, ellipsized, full text in the
+  // tooltip), with two actions beside it: COPY the token, or INSERT it into
+  // the chat draft. The ref is determined by the gesture (a selection always
+  // carries its text, a click never does), so what the row shows is always
+  // what copy/insert will emit. The row is user-select:none — a drag
+  // starting in it and running into the file text would mix anchors the ref
+  // resolvers reject (the selection would die mid-gesture), and its buttons
+  // must not collapse the live selection.
+  const activeRef = selRef ?? clickRef;
+  // The at-rest display and the copy-path value. The workspace root rides
+  // in every listing, so the absolute path is known without a fetch.
+  const headPath = props.absPath || props.relPath;
+  const headParts = headPath ? pathPartsOf(headPath) : null;
+  const absPath = props.absPath || (props.wsRoot && props.relPath ? absolutePathOf(props.wsRoot, props.relPath) : null);
+  // Copy path (BUG-006): the file's ABSOLUTE path, loopback-only (an
+  // absolute path is local-machine information — never offered when the GUI
+  // is reached over the network). Works in every mode, diff included; the
+  // External file's absolute path is known directly.
+  const offerCopyPath = !!absPath && isLoopbackOrigin();
+  // The ONE copy button copies what the row is showing: the active ref
+  // token, or — at rest — the file's path (loopback-only, BUG-006). The
+  // tooltip names the ACTION (the payload is what the row shows); there is
+  // never a second, ambiguous ⧉.
+  const copyValue = activeRef ?? (offerCopyPath ? absPath : null);
+  const headRow = props.name
+    ? <div className="dswFiles_paneHead">
+        {activeRef
+          ? <span className="dswFiles_paneHeadToken" title={activeRef} aria-label={activeRef}>{activeRef}</span>
+          : headParts
+            ? <span className="dswFiles_paneHeadPath" title={headPath || undefined}>
+                <span className="dswFiles_pathDirectory">{headParts.directory}</span><span className="dswFiles_pathName">{headParts.name}</span>
+              </span>
             : null}
-          {ctxRef.withText
-            ? (function () {
-                const wt = ctxRef.withText;
-                return <button type="button" role="menuitem" className="dswFiles_ctxItem" title={wt}
-                  onClick={() => { copyRef(wt); setCtxRef(null); }}>
-                  {Icon("IconCopyOutline16", { size: 14 }, "⧉")} {t("files.refCopyText")}
-                </button>;
-              })()
+        <span className="dswFiles_paneHeadBtns">
+          {/* Copy what the row shows: the ref token (active) or the path (rest). */}
+          {copyValue
+            ? <button type="button" className="dswFiles_headBtn"
+                title={activeRef ? t("files.refCopy") : t("files.copyPath")}
+                aria-label={activeRef ? t("files.refCopy") : t("files.copyPath")}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => copyRef(copyValue)}>
+                {refCopied ? Icon("IconCheckOutline16", { size: 14 }, "✓") : Icon("IconCopyOutline16", { size: 14 }, "⧉")}
+              </button>
             : null}
-          {/* Copy the raw content: the live selection when the menu was
-              opened on one, otherwise the whole file (only when the text
-              is loaded — the diff view skips the text fetch). */}
-          {ctxRef.selText != null
-            ? (function () {
-                const ct = ctxRef.selText;
-                return <button type="button" role="menuitem" className="dswFiles_ctxItem"
-                  onClick={() => { copyRef(ct); setCtxRef(null); }}>
-                  {Icon("IconCopyOutline16", { size: 14 }, "⧉")} {t("files.copySelection")}
-                </button>;
-              })()
-            : (st.status === "text" || st.status === "markdown")
-            ? (function () {
-                const ft = st.text || "";
-                if (!ft) return null;
-                return <button type="button" role="menuitem" className="dswFiles_ctxItem"
-                  onClick={() => { copyRef(ft); setCtxRef(null); }}>
-                  {Icon("IconCopyOutline16", { size: 14 }, "⧉")} {t("files.copyFile")}
-                </button>;
-              })()
+          {/* Insert the ref into the chat draft. */}
+          {activeRef && props.inputActions
+            ? <AddToChatBtn refText={activeRef} useInput={props.useInput ?? null} inputActions={props.inputActions} t={t}
+                className="dswFiles_headBtn" iconOnly />
             : null}
-          {/* Copy path (BUG-006): the file's ABSOLUTE path, loopback-only
-              (an absolute path is local-machine information — never offered
-              when the GUI is reached over the network). Independent of the
-              file text being loaded, so it also works in diff mode. An
-              External file's absolute path is known directly. */}
-          {(props.absPath || (props.wsRoot && props.relPath)) && isLoopbackOrigin()
-            ? (function () {
-                const abs = props.absPath || absolutePathOf(props.wsRoot!, props.relPath!);
-                return <button type="button" role="menuitem" className="dswFiles_ctxItem" title={abs}
-                  onClick={() => { copyRef(abs); setCtxRef(null); }}>
-                  {Icon("IconCopyOutline16", { size: 14 }, "⧉")} {t("files.copyPath")}
-                </button>;
-              })()
-            : null}
-          {/* The chat append takes a section ref: workspace-scoped, so an
-              External file's menu omits it. */}
-          {!ctxRef.external && props.inputActions
-            ? <AddToChatBtn refText={ctxRef.plain} useInput={props.useInput ?? null} inputActions={props.inputActions} t={t}
-                className="dswFiles_ctxItem" onDone={() => setCtxRef(null)} />
-            : null}
-        </div>;
-      })()
-    : null;
-
-  // Order: the copy actions lead (the primary, always-available affordance);
-  // the chat append trails, labeled explicitly "Add REF to chat" so the
-  // selection-to-button tie is unambiguous without hovering.
-  const refTools = selRef
-    ? <span className="dswFiles_refTools">
-        <button
-          type="button"
-          className="dswFiles_refBtn"
-          title={selRef.plain}
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={() => copyRef(selRef.plain)}
-        >{Icon("IconCopyOutline16", { size: 14 }, "⧉")} {refCopied ? t("files.refCopied") : refCopyLabel(t, selRef.withText !== selRef.plain, selRef.context)}</button>
-        {selRef.withText !== selRef.plain
-          ? <button
-              type="button"
-              className="dswFiles_refBtn"
-              title={selRef.withText}
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => copyRef(selRef.withText)}
-            >{Icon("IconCopyOutline16", { size: 14 }, "⧉")} {refCopied ? t("files.refCopied") : t("files.refCopyText")}</button>
-          : null}
-        {props.inputActions
-          ? <AddToChatBtn refText={selRef.plain} useInput={props.useInput ?? null} inputActions={props.inputActions} t={t} />
-          : null}
-      </span>
+        </span>
+      </div>
     : null;
 
   const toggleModes = paneToggleModes(diffable, props.name);
   const MODE_LABEL: Record<string, string> = { diff: "files.diff", view: "files.view", preview: "files.preview" };
-  // The view bar, rendered only while a file is viewed: mode/openLocal/ref
+  // The view bar, rendered only while a file is viewed: mode/openLocal
   // buttons on the left, and — only while the nav is hidden — the state
   // pair's RESTORE control on the right. Disappearing with the selection is
   // safe: FilesView keeps the nav expanded whenever nothing is viewed, so a
-  // hidden nav always has a view bar to carry its restore button.
+  // hidden nav always has a view bar to carry its restore button. (The
+  // section-ref affordances live in the head row below, not here.)
   const offerOpenLocal = canOfferOpenLocal({ relPath: props.relPath, absPath: props.absPath ?? null, wsRoot: props.wsRoot ?? null, openCapable: !!props.openCapable });
   const toggle = props.name
     ? <div className="dswFiles_paneToggle" role="group">
@@ -2436,7 +2617,15 @@ function PreviewPane(props: PreviewPaneProps) {
             key={m}
             type="button"
             className={"dswFiles_paneToggleBtn" + (effectiveMode === m ? " dswFiles_paneToggleBtnActive" : "")}
-            onClick={() => setMode(m)}
+            onClick={() => {
+              // Clicking the already-active mode is a no-op (and must not
+              // touch the preference). A real pick sets the mode AND the
+              // soft-sticky preference: Diff arms it for this session,
+              // View/Preview disarms it (last explicit choice wins).
+              if (m === effectiveMode) return;
+              setMode(m);
+              if (m === "diff") stickyDiffArm(props.sessionId); else stickyDiffClear(props.sessionId);
+            }}
             title={m === "preview" && renderKindOf(props.name) === "html" ? t("files.htmlPreviewTitle") : undefined}
           >{t(MODE_LABEL[m]!)}</button>
         ))}
@@ -2453,7 +2642,6 @@ function PreviewPane(props: PreviewPaneProps) {
               onClick={openLocal}
             >{Icon("IconFolderOpen16", { size: 14 }, "📂")} {t("files.openLocal")}</button>
           : null}
-        {refTools}
         {/* The state pair's restore control: present only while the nav is
             hidden, at the view bar's right end (the bar is the still-visible
             region then). The hide control lives in the nav's own header. */}
@@ -2483,14 +2671,11 @@ function PreviewPane(props: PreviewPaneProps) {
     ref={bodyRef}
     className="dswFiles_previewBody"
     style={{ display: "flex", flexDirection: "column", minHeight: 0, flex: "1 1 0" }}
-    onContextMenu={onPreviewContextMenu}
+    onMouseDown={onBodyMouseDown}
+    onMouseUp={onBodyMouseUp}
   >
     {toggle}
-    {/* The selected file's name: shown for every viewed file (diff, view or
-        preview mode), so the pane identifies itself in every mode. */}
-    {props.name
-      ? <div className="dswFiles_paneHead">{props.name}</div>
-      : null}
+    {headRow}
     {conflictNote}
     {openNote ? <div className="dswFiles_previewNote">{openNote}</div> : null}
     {/* A transient failure note from FilesView (an external open that could
@@ -2498,7 +2683,6 @@ function PreviewPane(props: PreviewPaneProps) {
         pane's empty state. */}
     {props.notice ? <div className="dswFiles_error">{props.notice}</div> : null}
     {body}
-    {ctxMenu}
   </div>;
 }
 
@@ -2557,6 +2741,11 @@ interface FilesViewProps {
       selecting one fails to the pane's error state, which is honest). */
   readAtAbs?: ((path: string, signal: AbortSignal) => Promise<FileShowValue>) | null;
   fetchDiff: (relPath: string, base: string, signal: AbortSignal, opts?: { noBinary?: boolean }) => Promise<DiffResponse>;
+  /** The live-update heartbeat. `dirs` = the ready expanded directories;
+      `openFile`/`openMtime` = the selected file and the mtime the view
+      currently holds for it (the host compares the disk against that
+      declared value); `deep` = skip the stat gate (the slow cycle). */
+  tick: (dirs: string[], openFile: string | null, openMtime: number | null, deep: boolean, showHidden: boolean, signal: AbortSignal) => Promise<TickResponse>;
   readMermaid: () => Promise<{ text: string }>;
   /**
    * Session standard kit (composer): the live-draft selector and the public
@@ -2571,6 +2760,12 @@ interface FilesViewProps {
       its preview should scroll to, and the navigation generation (a repeat
       open of the same file re-fires). null = none pending. */
   openRequest?: { path: string; line?: number; revision: number } | null;
+  /** A TRANSIENT resource frame (a file chip's redirect body): it mounts a
+      full Files view only to render through the redirect, then closes
+      ITSELF. Its unmount is part of opening a file, not the user closing
+      filestab, so it must not clear the session's soft-sticky diff
+      preference. The page tab and the conversation tab are surfaces. */
+  transient?: boolean;
 }
 function FilesView(props: FilesViewProps) {
   const t = props.t || ((k: string) => k);
@@ -2596,7 +2791,7 @@ function FilesView(props: FilesViewProps) {
     () => navCacheGet(sessionId)?.levelErr ?? {});
   // True once the host reports this session as gone (server restart / session
   // ended). Every RPC for a dead session fails with session-not-found, so the
-  // view latches: it stops the 5 s poll and shows a calm notice instead of the
+  // view latches: it stops the tick and shows a calm notice instead of the
   // raw code+UUID. Reload clears it to retry (a fresh session may have come up).
   const [sessionGone, setSessionGone] = React.useState(false);
   // BUG-005: the host's native-open capability (the version-tolerant probe
@@ -2616,6 +2811,25 @@ function FilesView(props: FilesViewProps) {
   const [editing, setEditing] = React.useState(false);
   const [draft, setDraft] = React.useState("");
   const [selectedFile, setSelectedFile] = React.useState<DirEntry | null>(null);
+  // The live-update machinery: the content re-fetch epoch (a bump re-reads
+  // the open file's bytes), the selection for the tick payload (the
+  // interval's closure is recreated on expanded-set changes only, so it
+  // reads refs), and the deep-cycle counter.
+  const [contentEpoch, setContentEpoch] = React.useState(0);
+  const openFileRef = React.useRef<string | null>(null);
+  openFileRef.current = selectedFile ? selectedFile.path : null;
+  // The mtime the view CURRENTLY holds for the open file (its entry in the
+  // current listing): the host compares the disk against this declared
+  // value — a changed listing applied by a tick moves the bar, so the next
+  // tick goes quiet. Null = nothing to compare.
+  const openMtimeRef = React.useRef<number | null>(null);
+  openMtimeRef.current = (() => {
+    if (!selectedFile) return null;
+    const listing = levels[parentPathOf(selectedFile.path)];
+    const entry = listing && listing.entries.find((e) => e.name === selectedFile.name);
+    return entry && typeof entry.mtime === "number" ? entry.mtime : null;
+  })();
+  const tickCountRef = React.useRef(0);
   // The External section (files OUTSIDE the workspace, pinned by absolute
   // path). The list is the persisted pin set; the selection is mutually
   // exclusive with the tree's selection and counts as "a file is viewed"
@@ -2769,7 +2983,7 @@ function FilesView(props: FilesViewProps) {
         // failure — the re-run re-queues the path.
         if (c.signal.aborted || seqRef.current[p] !== seq) return;
         // A dead session is terminal for this view: latch the flag (it stops
-        // the 5 s poll and swaps the pane to the calm notice) rather than
+        // the tick and swaps the pane to the calm notice) rather than
         // leaking the raw "session-not-found: no live session for <uuid>"
         // string.
         if (isSessionGone(e)) { setSessionGone(true); return; }
@@ -2792,6 +3006,14 @@ function FilesView(props: FilesViewProps) {
   React.useEffect(() => {
     if (sessionGone) navCacheDrop(sessionId);
   }, [sessionId, sessionGone]);
+  // The soft-sticky diff preference is in-memory and surface-scoped: it dies
+  // when this surface's session changes (the cleanup runs on the change) or
+  // when the surface closes (unmount). A transient resource frame closes
+  // ITSELF as part of opening a file — not the user closing filestab — so it
+  // never clears the preference.
+  React.useEffect(() => () => {
+    if (!props.transient) stickyDiffClear(sessionId);
+  }, [sessionId]);
 
   // The path the LAST openRequest (a chip open) asked for: only a chip open
   // is eligible for the external fallback below. A stale RESTORED selection
@@ -2984,74 +3206,82 @@ function FilesView(props: FilesViewProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [revLive]);
 
-  // jj state changes between visits. The code refreshes every READY expanded
-  // directory's listing every 5 s (force=false: the host reuses its
-  // structural-failure cache). A failed poll keeps the last good listing, so
-  // the view never degrades.
-  const vcsOk = !!vcsInfo;
-  // A stable key for the poll's target set (ready expanded directories):
-  // the interval re-creates only when the set itself changes, not on every
-  // listing swap.
-  const pollKey = expanded.filter((p) => levels[p] && levelErr[p] === undefined).join("\u0000")
-    + "\u0000" + (revLive || "") + "\u0000" + String(showHidden);
-  // Monotonic poll sequence: an in-flight poll's response must not apply
-  // once a newer poll (or a re-run of this effect) supersedes it. A stale
-  // worktree response clobbers a fresh snapshot listing and rolls the commit
-  // dropdown back.
-  const pollSeqRef = React.useRef(0);
+  // Live updates: one tick POST per 5 s asks the host "did anything I show
+  // change?" — the host gates the expensive read behind three fs.stat
+  // checks, so a quiet cycle costs zero VCS spawns; a change comes back
+  // WITH its fresh listings (no re-fetch round-trip) and, for the open
+  // file, a content-epoch bump that re-reads its bytes. Every DEEP_EVERY
+  // ticks skips the gate (deep) — the gate cannot see new/removed files in
+  // other directories. Snapshot mode is not ticked: a committed tree is
+  // immutable history, and the tick's worktree listings must not clobber
+  // it. A plain (non-VCS) workspace pays one walk per deep cycle (the
+  // host's VCS probes degrade to cached structural failures there).
+  // The tick targets (ready expanded directories) as a LIVE ref: the
+  // interval outlives renders, so it must not read a render closure — a
+  // closure captured before the first listing loaded would see an empty
+  // `levels` forever (a key for the set can't wake the effect: the root
+  // path is "", so "root ready" and "nothing ready" join to the same
+  // string). The ref updates on every render; early ticks before the list
+  // loads simply no-op (no request).
+  const tickTargetsRef = React.useRef<string[]>([]);
+  tickTargetsRef.current = expanded.filter((p) => levels[p] && levelErr[p] === undefined);
+  // Monotonic sequence: a superseded tick's response must not apply.
+  const tickSeqRef = React.useRef(0);
   React.useEffect(() => {
-    // A latched dead session has no point polling (every tick would 404 the
-    // same way); the flag also re-runs this effect to clear the interval.
-    if (!vcsOk || sessionGone) return;
+    // Dead-session latch: every tick would 404 the same way; the flag also
+    // re-runs this effect to clear the interval. Snapshot mode: no tick
+    // (the worktree listings must not clobber a committed tree).
+    if (sessionGone || revLive) return;
+    const DEEP_EVERY = 3; // 5 s × 3 = a 15 s tree-membership horizon
     const iv = setInterval(() => {
-      const seq = ++pollSeqRef.current;
+      const seq = ++tickSeqRef.current;
       const c = new AbortController();
-      const targets = expanded.filter((p) => levels[p] && levelErr[p] === undefined);
+      const targets = tickTargetsRef.current;
       if (targets.length === 0) return;
-      // Same mode as the fetch effect: the poll keeps the snapshot's tree
-      // (and the worktree `jj` block behind the dropdown) fresh.
-      Promise.allSettled(targets.map((p) => listDirectory(p, c.signal, showHidden, false, revLive))).then((results) => {
-        if (seq !== pollSeqRef.current || c.signal.aborted) return; // superseded
+      const deep = ++tickCountRef.current % DEEP_EVERY === 0;
+      props.tick(targets, openFileRef.current, openMtimeRef.current, deep, showHidden, c.signal).then((v) => {
+        if (seq !== tickSeqRef.current || c.signal.aborted) return; // superseded
+        if (!v) return;
+        if (v.openFile === "changed") setContentEpoch((n) => n + 1);
+        if (v.list === "same") return;
         const patch: Record<string, Listing> = {};
         const errs: Record<string, string> = {};
-        let gone = false;
-        results.forEach((r, i) => {
-          const p = targets[i]!;
-          if (r.status === "rejected") {
-            const e = r.reason;
-            // A session that died mid-view stops the poll (the last good
-            // listings stay on screen).
-            if (isSessionGone(e)) { gone = true; return; }
-            // A directory that vanished since the last good listing drops
-            // its level (the note row takes over); other transient errors
-            // keep the last good listing.
-            if (e instanceof RpcError && e.code === "directory-unreadable"
-                && (e.details as { path?: string } | undefined)?.path === p) {
-              errs[p] = rpcErrorText(e, t);
-            }
+        v.list.listings.forEach((l, i) => {
+          const pth = targets[i];
+          if (pth === undefined) return;
+          if (l && typeof l === "object" && "error" in l) {
+            // A vanished directory drops its level (the note row takes
+            // over); other errors keep the last good listing.
+            if (l.error === "not-found")
+              errs[pth] = rpcErrorText(new RpcError("directory-unreadable", "not-found: " + pth, { path: pth }), t);
             return;
           }
-          patch[p] = r.value;
+          if (l) patch[pth] = l as Listing;
         });
-        if (gone) { setSessionGone(true); return; }
         if (Object.keys(patch).length === 0 && Object.keys(errs).length === 0) return;
         noteCommits(patch[ROOT_PATH] || Object.values(patch)[0] || null);
         setLevels((prev) => {
           let out = prev;
-          for (const p of Object.keys(patch)) {
-            if (out[p]) out = Object.assign({}, out, { [p]: patch[p]! });
+          for (const pth of Object.keys(patch)) {
+            if (out[pth]) out = Object.assign({}, out, { [pth]: patch[pth]! });
           }
-          for (const p of Object.keys(errs)) {
-            if (out[p]) { out = Object.assign({}, out); delete out[p]; }
+          for (const pth of Object.keys(errs)) {
+            if (out[pth]) { out = Object.assign({}, out); delete out[pth]; }
           }
           return out;
         });
         if (Object.keys(errs).length > 0) setLevelErr((prev) => Object.assign({}, prev, errs));
+      }).catch((e) => {
+        if (seq !== tickSeqRef.current || c.signal.aborted) return;
+        // A dead session latches (last good listings stay on screen); any
+        // other error keeps the last good view — a failed tick must never
+        // degrade it.
+        if (isSessionGone(e)) setSessionGone(true);
       });
     }, 5000);
-    return () => { pollSeqRef.current++; clearInterval(iv); }; // invalidate in-flight
+    return () => { tickSeqRef.current++; clearInterval(iv); }; // invalidate in-flight
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pollKey, vcsOk, sessionGone]);
+  }, [sessionGone, revLive, showHidden]);
 
   React.useEffect(() => {
     if (pendingSelRef.current) return; // do not clobber the not-yet-applied restored selection
@@ -3181,7 +3411,9 @@ function FilesView(props: FilesViewProps) {
   // directory that has a cached fetch error clears the error so the fetch
   // effect retries (the note row stands for the current attempt only).
   const toggleDir = (path: string) => {
-    setExpanded((prev) => prev.includes(path) ? prev.filter((p) => p !== path) : [ROOT_PATH, ...prev, path]);
+    // The Set keeps the root out twice: expanding the root while it is not
+    // yet listed would otherwise push it as both the prefix and `path`.
+    setExpanded((prev) => prev.includes(path) ? prev.filter((p) => p !== path) : [...new Set([ROOT_PATH, ...prev, path])]);
     setLevelErr((prev) => { if (prev[path] === undefined) return prev; const n = Object.assign({}, prev); delete n[path]; return n; });
   };
   const pick = (entry: DirEntry) => {
@@ -3544,6 +3776,7 @@ function FilesView(props: FilesViewProps) {
           name={selectedExternal ? pathPartsOf(selectedExternal).name : selectedFile ? selectedFile.name : null}
           relPath={selectedExternal ? null : selectedFile ? selectedFile.path : null}
           absPath={selectedExternal || null}
+          sessionId={sessionId}
           // Every listing carries the host's absolute workspace root — the
           // source for the loopback-only "copy path" action (BUG-006).
           wsRoot={rootPath}
@@ -3554,6 +3787,7 @@ function FilesView(props: FilesViewProps) {
           // The commit's changeset is known once any listing loads
           // (then an absent entry = the commit never touched the file).
           changesetKnown={selectedExternal ? false : (!snapshotMode || !!refListing)}
+          contentEpoch={contentEpoch}
           readAt={props.readAt}
           readAtAbs={props.readAtAbs ?? null}
           notice={extNotice}
@@ -3674,10 +3908,16 @@ interface RightPaneBodyProps {
   sessionId: string | null;
   listDirectory: (relPath: string, signal: AbortSignal, showHidden: boolean, force: boolean, rev: string | null) => Promise<Listing>;
   fetchDiff: (relPath: string, base: string, signal: AbortSignal, opts?: { noBinary?: boolean }) => Promise<DiffResponse>;
+  tick: (dirs: string[], openFile: string | null, openMtime: number | null, deep: boolean, showHidden: boolean, signal: AbortSignal) => Promise<TickResponse>;
   readAt: (relPath: string, rev: string, signal: AbortSignal) => Promise<FileShowValue>;
   readAtAbs: (path: string, signal: AbortSignal) => Promise<FileShowValue>;
   readMermaid: () => Promise<{ text: string }>;
   t: TFunc;
+  // The composer's input face, standard props of this slot (the framework
+  // passes them alongside the inject result): the draft read (so the append
+  // lands after the existing text) and setDraft (the insert action).
+  useInput?: ((sel: (s: { draft: string }) => string) => string) | null;
+  inputActions?: { setDraft(text: string): void } | null;
 }
 
 // One tab of the `files` type. The page (`sidebar://files`) IS the single
@@ -3719,11 +3959,18 @@ function RightPaneBody(props: RightPaneBodyProps) {
     sessionId={props.sessionId}
     listDirectory={props.listDirectory}
     fetchDiff={props.fetchDiff}
+    tick={props.tick}
     readAt={props.readAt}
     readAtAbs={props.readAtAbs}
     readMermaid={props.readMermaid}
     t={props.t}
+    useInput={props.useInput ?? null}
+    inputActions={props.inputActions ?? null}
     openRequest={openRequest}
+    // The redirect frame (a same-session resource open) closes itself after
+    // handing the open to the page — a routine OPEN, not a close of
+    // filestab, so it must not clear the session's soft-sticky preference.
+    transient={redirectKey !== null}
   />;
 }
 
@@ -3783,6 +4030,11 @@ function apply(ctx: FilestabContext): void {
     readAtAbs: (path: string, signal: AbortSignal) =>
       connection.rpc.call(BROWSE_CHANNEL, "fileshow-abs", { sessionId, path }, signal)
         .then((v) => unwrap<FileShowValue>(v)),
+    // The live-update heartbeat (the host's stat gate; deep skips it).
+    tick: (dirs: string[], openFile: string | null, openMtime: number | null, deep: boolean, showHidden: boolean, signal: AbortSignal) =>
+      connection.rpc.call(BROWSE_CHANNEL, "tick", { sessionId, dirs, showHidden, deep,
+        ...(openFile ? { openFile, ...(openMtime !== null ? { openMtime } : {}) } : {}) }, signal)
+        .then((v) => unwrap<TickResponse>(v)),
     // The vendored mermaid renderer bundle. The host serves the
     // package-local dist/mermaid.min.js as text. The client inlines it
     // into the sandbox iframe's srcdoc.
@@ -3836,4 +4088,4 @@ export { apply };
 // Test-only seam. The cordis loader ignores it (it reads apply/inject/name
 // only). This export exposes the pure preview helpers so
 // test/client.test.mjs can unit-test them.
-export const __test = { renderMarkdown, renderMarkdownWithImages, markdownImageSrcs, isLocalDocImageSrc, resolveDocImage, rewriteMarkdownImages, highlightSource, buildMermaidDoc, typeLabel, formatBytes, formatAge, fileRowMeta, loadState, saveState, segmentsForPath, orderEntries, parseDiff, displayRows, gapAfter, statusAggregate, jjRowLabel, rollupFor, rollupLabel, rollupSlot, DiffView, unifiedCells, unifiedPairs, intraLineDiff, intraTokens, realPathOf, renderKindOf, resolvePaneMode, paneToggleModes, previewContentFor, listNavTarget, unwrap, isSessionGone, rpcErrorText, isLoopbackOrigin, absolutePathOf, toAbsoluteCandidate, hostEnvelope, parseHostResponse, hostApi, hostDescribe, hostOpenPath, HostMethodAbsent, canOfferOpenLocal, buildFileRef, mentionOf, lineStartsOf, lineOfOffset, REF_TEXT_MAX, scrollToTextLine, parseFileAddress, fileAddressBasename, diffLayoutNarrow, RightPaneBody, PreviewPane };
+export const __test = { renderMarkdown, renderMarkdownWithImages, markdownImageSrcs, isLocalDocImageSrc, resolveDocImage, rewriteMarkdownImages, highlightSource, buildMermaidDoc, typeLabel, formatBytes, formatAge, fileRowMeta, loadState, saveState, segmentsForPath, orderEntries, parseDiff, displayRows, gapAfter, statusAggregate, jjRowLabel, rollupFor, rollupLabel, rollupSlot, DiffView, unifiedCells, unifiedPairs, intraLineDiff, intraTokens, realPathOf, renderKindOf, resolvePaneMode, paneToggleModes, stickyDiffArm, stickyDiffClear, stickyDiffArmed, previewContentFor, listNavTarget, unwrap, isSessionGone, rpcErrorText, isLoopbackOrigin, absolutePathOf, toAbsoluteCandidate, hostEnvelope, parseHostResponse, hostApi, hostDescribe, hostOpenPath, HostMethodAbsent, canOfferOpenLocal, buildFileRef, mentionOf, lineStartsOf, lineOfOffset, REF_TEXT_MAX, scrollToTextLine, parseFileAddress, fileAddressBasename, diffLayoutNarrow, commitRefToChat, RightPaneBody, PreviewPane };

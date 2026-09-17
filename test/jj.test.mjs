@@ -156,7 +156,7 @@ ok(stA.ok, "status A ok: " + JSON.stringify(stA));
 {
   const by = Object.fromEntries(stA.changes.map((e) => [e.path, e]));
   ok(by["a.txt"]?.status === "M" && by["a.txt"].base === "worktree", "M a.txt (worktree): " + JSON.stringify(by["a.txt"]));
-  ok(by["n.txt"]?.status === "A" && by["n.txt"].base === "worktree", "A n.txt (worktree)");
+  ok(by["n.txt"]?.status === "U" && by["n.txt"].base === "worktree", "unadded n.txt shows U (jj has no staging: worktree A = git U): " + JSON.stringify(by["n.txt"]));
   ok(by["k.txt"]?.status === "D" && by["k.txt"].base === "worktree", "D k.txt (worktree)");
   ok(by["sub/s2.txt"]?.status === "R" && by["sub/s2.txt"]?.oldPath === "sub/s.txt", "R sub/s2.txt (worktree): " + JSON.stringify(by["sub/s2.txt"]));
   ok(stA.conflicts.length === 0, "no conflicts");
@@ -567,6 +567,37 @@ const PIC2 = (await jjWorkspaceStatus(ws, { force: true })).commits[0].id;
   ok(r.value.patch.indexOf("Binary files ") >= 0 && r.value.patch.indexOf("new file mode") >= 0, "sanity: the marker substrings ARE in the patch body (the old substring scan would have fired)");
   ok(r.value.binary === undefined, "NO binary block for a text file whose content contains the marker strings (false-positive regression)");
 }
+
+// ── tick: the jj hot-file gate ──────────────────────────────────────────
+// The gate stats .jj/working_copy/tree_state + .jj/repo/op_heads/heads.
+// Verified behavior: filestab's own reads (--no-integrate-operation) leave
+// them stable; an INTEGRATED jj op (bookmark, new) moves op_heads/heads
+// and trips the gate on the next shallow tick.
+{ const r = await call("tick", { sessionId: "sess-1", dirs: [""] });
+  ok(r.ok && r.value.openFile === "same" && r.value.list === "same", "jj cold tick baselines (the client already holds the listing): " + JSON.stringify(r.value)); }
+{ const r = await call("tick", { sessionId: "sess-1", dirs: [""] });
+  ok(r.value.openFile === "same" && r.value.list === "same", "jj quiet tick → same/same (filestab's own deep read left the hot files stable): " + JSON.stringify(r.value)); }
+// An integrated op that moves the op head but NO visible state: the gate
+// MUST trip (op_heads/heads is rewritten), the deep read runs, the
+// signature is unchanged, and the answer is an honest "same" — a trip is
+// not a change.
+{ const before = await opHead(ws);
+  const bb = await jjIn(ws, ["bookmark", "create", "tick-bm"]);
+  ok(bb.code === 0, "bookmark create: " + bb.err);
+  const after = await opHead(ws);
+  ok(before !== after, "(sanity) the bookmark op moved the integrated op head");
+  const r = await call("tick", { sessionId: "sess-1", dirs: [""] });
+  ok(r.value.openFile === "same" && r.value.list === "same", "op-head move with no visible state change → same (gate tripped, sig did not): " + JSON.stringify(r.value)); }
+// An integrated op that moves the HEAD: the commit list changes → visible.
+{ const h1 = (await jjWorkspaceStatus(ws, { force: true })).head.id;
+  const nv = await jjIn(ws, ["new", "-m", "tick-step"]);
+  ok(nv.code === 0, "jj new: " + nv.err);
+  const r = await call("tick", { sessionId: "sess-1", dirs: [""] });
+  ok(r.value.list !== "same", "jj new (head moved) → list changed: " + JSON.stringify(r.value.list === "same" ? "same" : "changed"));
+  const vcs = r.value.list.listings[0].vcs;
+  ok(vcs.ok === true && vcs.head.id !== h1, "the fresh vcs block carries the new head"); }
+{ const r = await call("tick", { sessionId: "sess-1", dirs: [""] });
+  ok(r.value.list === "same", "after the deep read absorbed the state, the next shallow tick is quiet: " + JSON.stringify(r.value)); }
 
 await rm(base, { recursive: true, force: true });
 console.log(`jj: ${n} assertions passed (parse + real jj ${await new Promise((r) => execFile("jj", ["--version"], (_, so) => r(so.trim().split("\n")[0])))})`);

@@ -11,7 +11,7 @@
 // same-origin document (no served HTML/SVG to execute, no whole-FS read
 // surface).
 
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -144,7 +144,7 @@ const DIFF_PATCH_CAP = 1_000_000; // chars, ~1 MB. It keeps the RPC payload and 
 // header's cwd is IMMUTABLE — a session is ever re-created under its id via
 // resume, which reuses the stored header — so a resolved root never goes
 // stale, and skipping the re-inspect spares a full log read from disk per
-// poll. Misses are deliberately NOT cached: a not-persisted id is cheap to
+// tick. Misses are deliberately NOT cached: a not-persisted id is cheap to
 // re-check, and a log written after the first check (a crash mid-write) must
 // not stay invisible for the process's lifetime.
 const coldWorkspaceRoots = new Map<string, string>();
@@ -213,10 +213,61 @@ async function resolveWorkspace(ctx: Context, sessionId: unknown): Promise<{ roo
 // worktree diff and git's staged+unstaged view disagree. On jj's failure
 // the code tries git. If both fail, the code degrades to non-VCS with
 // the most meaningful code.
-// The code caches the per-workspace verdict (list refreshes it per poll,
+// The code caches the per-workspace verdict (list and tick refresh it,
 // `force` re-probes). A diff request reads the backend, not the full
 // status. A positive verdict is safe for a session (Reload re-probes).
 const backendVerdict = new Map<string, "jj" | "git" | "none">(); // workspaceRoot → verdict
+
+// ── tick (the live-update gate) ─────────────────────────────────────────────
+// Contract: one POST per client cycle answers both freshness questions and
+// runs the expensive read (dir walks + one workspace-wide VCS compound read)
+// ONLY when the gate trips — the open file's disk mtime ≠ the mtime the
+// client declared it holds, or a VCS hot file moved (jj:
+// .jj/working_copy/tree_state + .jj/repo/op_heads/heads; git: .git/index +
+// .git/HEAD). Quiet cycle: three fs.stat, zero VCS spawns. Verified on jj
+// 0.45 + git 2.55: worktree edits touch neither VCS dir (lazy snapshot) and
+// filestab's own reads (--no-integrate-operation) leave the hot files stable,
+// so the gate cannot trip on its own reads. The hot baseline is re-taken
+// after a deep read anyway (a read that does move the metadata is absorbed).
+// The gate cannot see new/removed files in other dirs — the client's deep
+// cycle (deep: true) skips the gate; tree membership is ≤ one deep cycle
+// stale.
+interface TickState {
+  kind: "jj" | "git" | "none";
+  hot: number[] | null;
+  listSig: string | null;
+}
+const tickStates = new Map<string, TickState>();
+const TICK_DIR_CAP = 16; // a UI cannot meaningfully expand more than this
+
+const hotRelPaths = (kind: TickState["kind"]): string[] =>
+  kind === "jj" ? [".jj/working_copy/tree_state", ".jj/repo/op_heads/heads"]
+  : kind === "git" ? [".git/index", ".git/HEAD"]
+  : [];
+
+const statMtime = (abs: string): Promise<number> => stat(abs).then((s) => Math.round(s.mtimeMs));
+
+const listingSig = (l: ListingValue): string =>
+  l.relPath + "#" + l.entries
+    .map((e) => e.name + ":" + (e.size ?? 0) + ":" + (e.mtime ?? 0) + (e.isDirectory ? "/" : ""))
+    .join(",");
+
+const vcsSig = (v: VcsStatus): string =>
+  v.ok === true
+    ? v.backend + ":" + ((v as { head?: { id?: string } }).head?.id ?? "") + ":"
+      + ((v as { changes?: ChangeEntry[] }).changes ?? []).map((c) => c.path + c.status).sort().join(",")
+    : "novcs:" + (v as { code: string }).code;
+
+const hotBaseline = async (root: string, kind: TickState["kind"]): Promise<number[] | null> => {
+  const paths = hotRelPaths(kind);
+  if (paths.length === 0) return null;
+  const now: number[] = [];
+  for (const rel of paths) {
+    try { now.push(await statMtime(join(root, rel))); }
+    catch { return null; } // missing layout (e.g. a git-worktree .git file) → the gate is blind; the deep cycle covers it
+  }
+  return now;
+};
 
 async function vcsStatus(root: string, { force = false }: { force?: boolean } = {}): Promise<VcsStatus> {
   const jjSt = await jjWorkspaceStatus(root, { force });
@@ -267,7 +318,7 @@ function envelopeError(error: { code?: string; message?: string; details?: Recor
   }
 }
 
-// The /filez-browse wire contract. The client calls three endpoints. Every
+// The /filez-browse wire contract. Every
 // payload carries sessionId. The server re-resolves the workspace from it.
 //   list     { sessionId, relPath?, showHidden?, force?, rev? } → listing + a
 //     `vcs` WORKTREE status block (backend jj|git, git-support.md §4) +
@@ -287,6 +338,18 @@ function envelopeError(error: { code?: string; message?: string; details?: Recor
 //     The session is the scope (it must resolve); the path is absolute and
 //     is NOT containment-checked — the caller is the session owner. Same
 //     cap and classification as the worktree fileshow.
+//   tick     { sessionId, dirs?, openFile?, openMtime?, showHidden?, deep? } →
+//     { openFile: "same"|"changed", list: "same" | { listings } }. The
+//     client's heartbeat: three fs.stat gates (the open file vs the
+//     client-DECLARED openMtime — disk-vs-held, no server baseline — +
+//     the VCS hot files) decide whether the deep read runs; the deep read
+//     is the full walk of `dirs` + ONE workspace-wide vcs compound read
+//     (its block rides on the root's slot — the first good listing when
+//     the root is not among `dirs`). `listings` is parallel
+//     to `dirs` (a per-dir { error, relPath } slot on failure).
+//     `deep: true` skips the gate (the client's slow cycle, for tree
+//     membership the gate cannot see). See the tick-state block above for
+//     the gate's contract.
 //   Errors   map onto the client's CLOSED rpcErrorSchema code set
 //     (envelopeError). Plugin-specific codes ride in `message`.
 function makeBrowseHandler(ctx: Context): (endpoint: string, payload: BrowsePayload | null | undefined) => Promise<RpcResult> {
@@ -460,7 +523,7 @@ function makeBrowseHandler(ctx: Context): (endpoint: string, payload: BrowsePayl
         // non-displayable → no `data` (the card). `noBinary: true` skips
         // the reads (committed bytes are history-stable; the client keeps
         // its first fetch's copy and drops it when the patch changes, so a
-        // live worktree edit re-fetches on the next poll).
+        // live worktree edit re-fetches on the next tick).
         // Side resolution per base: the worktree base is @ vs @- (jj) /
         // HEAD vs disk (git) — its NEW side is the LIVE file, read on disk
         // like the view mode (and its untracked files have no git object
@@ -596,6 +659,91 @@ function makeBrowseHandler(ctx: Context): (endpoint: string, payload: BrowsePayl
         const r = await absoluteFileShow(p.path);
         if ("error" in r) return { ok: false, error: { code: r.error, message: r.message } };
         return { ok: true, value: r };
+      } catch (error) {
+        const e = error as { name?: string; message?: string } | null;
+        if (e?.name === "WorkspacePathError")
+          return { ok: false, error: { code: "forbidden", message: e.message ?? "" } };
+        return { ok: false, error: { code: "io-error", message: e?.message ?? String(error) } };
+      }
+    }
+    if (endpoint === "tick") {
+      try {
+        const ws = await resolveWorkspace(ctx, p.sessionId);
+        if ("error" in ws) return { ok: false, error: ws.error };
+        // Deduped: duplicated slots are applied in order by the client
+        // (last wins) — a duplicate root slot without the vcs block would
+        // clobber the marks.
+        const dirs = Array.from(new Set(
+          (Array.isArray(p.dirs)
+            ? p.dirs.filter((d): d is string => typeof d === "string")
+            : [""]).slice(0, TICK_DIR_CAP),
+        ));
+        const showHidden = p.showHidden === true;
+        const openFile = typeof p.openFile === "string" && p.openFile.length > 0 ? p.openFile : null;
+        // Disk-vs-declared (the mtime the client's current listing holds),
+        // not disk-vs-server-baseline: a first-sight baseline could absorb
+        // an edit the client never saw.
+        const openMtime = typeof p.openMtime === "number" ? p.openMtime : null;
+        const st: TickState = tickStates.get(ws.root)
+          ?? { kind: "none", hot: null, listSig: null };
+        // ── the gate: three stats, zero spawns ──
+        let openChanged = false;
+        // A cold workspace must deep-read to baseline: without a signature
+        // the first real change would be absorbed and never reported.
+        let gate = p.deep === true || st.listSig === null;
+        if (openFile && openMtime !== null) {
+          try {
+            const s = await stat(await resolveInWorkspace(ws.root, openFile));
+            openChanged = Math.round(s.mtimeMs) !== openMtime;
+          } catch (e) {
+            // ENOENT = it went away → changed (the pane re-reads into its
+            // error state). Containment/FS errors claim nothing.
+            if ((e as NodeJS.ErrnoException).code === "ENOENT") openChanged = true;
+          }
+          if (openChanged) gate = true; // the worktree moved under a VCS eye — the list/marks are stale too
+        }
+        if (!gate && st.kind !== "none") {
+          const now = await hotBaseline(ws.root, st.kind);
+          if (now !== null) {
+            if (!st.hot || st.hot.length !== now.length || st.hot.some((m, i) => m !== now[i])) gate = true;
+            st.hot = now;
+          }
+        }
+        if (!gate) {
+          tickStates.set(ws.root, st);
+          return { ok: true, value: { openFile: openChanged ? "changed" : "same", list: "same" } };
+        }
+        // ── deep read: the full walk + ONE workspace-wide VCS compound read ──
+        let vcs: VcsStatus;
+        try { vcs = await vcsStatus(ws.root); }
+        catch { vcs = { ok: false, code: "vcs-error", message: "status failed" }; }
+        backendVerdict.set(ws.root, vcs.ok === true ? vcs.backend : "none");
+        if (vcs.ok === true && st.kind !== vcs.backend) { st.kind = vcs.backend; st.hot = null; }
+        const listings: (ListingValue & { vcs?: VcsStatus } | { error: string; relPath: string })[] = [];
+        for (const d of dirs) {
+          const listing = await listDirectory(ws.root, d, { showHidden });
+          if ("error" in listing) listings.push({ error: listing.error, relPath: d });
+          else listings.push(listing);
+        }
+        // The vcs block rides ONCE (the per-dir repetition is what this
+        // endpoint exists to kill), on the root's slot when the root is in
+        // the request — the client reads its marks from levels[ROOT_PATH]
+        // specifically — else the first good listing.
+        const rootSlot = listings.findIndex((l) => !("error" in l) && l.relPath === "");
+        const vcsSlot = rootSlot >= 0 ? rootSlot : listings.findIndex((l) => !("error" in l));
+        if (vcsSlot >= 0) (listings[vcsSlot] as ListingValue & { vcs?: VcsStatus }).vcs = vcs;
+        const sig = listings.map((l) => ("error" in l ? l.relPath + "#err" : listingSig(l))).join("|")
+          + "|" + vcsSig(vcs);
+        st.hot = await hotBaseline(ws.root, st.kind); // re-baseline after the read (it may have moved the metadata)
+        const prevSig = st.listSig;
+        st.listSig = sig;
+        tickStates.set(ws.root, st);
+        // Cold (baseline only — the client holds equivalent listings) or
+        // a gate trip that changed nothing visible (e.g. a bookmark op):
+        // report nothing.
+        if (prevSig === null || prevSig === sig)
+          return { ok: true, value: { openFile: openChanged ? "changed" : "same", list: "same" } };
+        return { ok: true, value: { openFile: openChanged ? "changed" : "same", list: { listings } } };
       } catch (error) {
         const e = error as { name?: string; message?: string } | null;
         if (e?.name === "WorkspacePathError")

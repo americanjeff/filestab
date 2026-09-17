@@ -117,8 +117,20 @@ body[data-ds-dark-theme] .dswFiles_previewMarkdown pre .hljs-comment,.dswFiles_p
 .dswFiles_diffCueOn{opacity:1}
 /*Sticky on both axes: the head stays put while the diff scrolls vertically and across the horizontal range.*/
 .dswFiles_diffHead{position:sticky;top:0;left:0;z-index:1;background:var(--dsw-alias-bg-base);padding:8px 10px 6px;border-bottom:1px solid var(--dsw-alias-border-l3)}
-/*The pane's general name header: the selected file's name, shown above its content in every mode (diff, view, preview). Same look the diff head used to carry.*/
-.dswFiles_paneHead{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:600;word-break:break-all;padding:8px 10px 6px;border-bottom:1px solid var(--dsw-alias-border-l3)}
+/*The head row doubles as the ref surface: at rest it shows the file's path,
+a click/selection on source text morphs it into the exact ref token. The
+action cluster hugs the path/token (flex:0 1 auto — natural width, shrinking
+with an ellipsis only when it runs out of room): buttons at the row's far
+end would read as "acts on the file", not "acts on the ref". One line, fixed
+height (never wraps); user-select off so a drag from the row into the file
+text can't build a mixed-anchor selection the resolvers reject, and so
+clicking the buttons never collapses the live selection.*/
+.dswFiles_paneHead{display:flex;align-items:center;gap:6px;padding:6px 10px;border-bottom:1px solid var(--dsw-alias-border-l3);user-select:none;-webkit-user-select:none;min-height:30px}
+.dswFiles_paneHeadPath{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600}
+.dswFiles_paneHeadToken{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:18px;color:var(--dsw-alias-label-primary)}
+.dswFiles_paneHeadBtns{display:flex;gap:2px;align-items:center;flex:none}
+.dswFiles_headBtn{cursor:pointer;background:0 0;border:none;border-radius:5px;padding:1px 5px;font-size:11px;line-height:18px;color:var(--dsw-alias-label-secondary);display:inline-flex;align-items:center;gap:3px;white-space:nowrap}
+.dswFiles_headBtn:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
 .dswFiles_diffMeta{padding-top:2px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
 .dswFiles_diffBinaryRow{display:flex;gap:8px;padding:8px;flex:1 1 0;min-height:0}
 .dswFiles_diffBinaryPane{flex:1 1 0;min-width:0;min-height:0;display:flex;flex-direction:column;gap:4px}
@@ -176,20 +188,6 @@ body[data-ds-dark-theme] .dswFiles_previewMarkdown pre .hljs-comment,.dswFiles_p
 .dswFiles_paneToggle{display:flex;gap:2px;flex:none;padding:6px 0 0 8px}
 .dswFiles_paneToggleBtn{cursor:pointer;background:0 0;border:none;border-radius:5px;padding:1px 10px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
 .dswFiles_paneToggleBtn:hover{color:var(--dsw-alias-label-primary)}
-/*Section-ref toolbar, shown while a selection is live. Buttons swallow mousedown so they never take focus, and the selection — with its computed refs — survives the click.*/
-.dswFiles_refTools{display:inline-flex;gap:2px;align-items:center;margin-left:6px;padding-left:8px;border-left:1px solid var(--dsw-alias-border-l3)}
-.dswFiles_refBtn{cursor:pointer;white-space:nowrap;background:0 0;border:none;border-radius:5px;padding:1px 8px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);display:inline-flex;align-items:center;gap:4px}
-.dswFiles_refBtn:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
-/*Right-click context menu — the native menu cannot be extended from web*/
-/*content, so this replaces it, scoped to the content pane. The monospace*/
-/*head shows the exact ref, keeping the menu free of localizable words.*/
-/*Absolutely placed in the pane root, not fixed: the module table has no*/
-/*createPortal, and a transformed ancestor would re-anchor a fixed menu.*/
-.dswFiles_previewBody{position:relative}
-.dswFiles_ctxMenu{position:absolute;z-index:2000;min-width:200px;max-width:380px;padding:4px;background:var(--dsw-alias-bg-elevated,var(--dsw-alias-bg-base,#fff));border:1px solid var(--dsw-alias-border-l2);border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.22)}
-.dswFiles_ctxHead{padding:5px 8px 6px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:15px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:370px}
-.dswFiles_ctxItem{display:flex;align-items:center;gap:6px;width:100%;cursor:pointer;background:0 0;border:none;border-radius:5px;padding:4px 8px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-primary);text-align:left;white-space:nowrap}
-.dswFiles_ctxItem:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .dswFiles_paneToggleBtnActive{background:var(--dsw-alias-interactive-bg-active,var(--dsw-alias-interactive-bg-hover));color:var(--dsw-alias-label-primary)}
 /*External section: the pinned out-of-workspace files, a fixed (flex:none) band between the tree and the pane's bottom edge — zero height while it renders nothing, self-capping (max-height + its own scroll) so a long pin set can never starve the tree.*/
 .dswFiles_extSection{flex-direction:column;flex:none;min-height:0;max-height:40%;border-top:1px solid var(--dsw-alias-border-l3);display:flex}
