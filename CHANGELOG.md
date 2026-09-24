@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.7] - 2026-09-24
+
+- Right column: filestab coexists with the built-in file browser. It registers its own `filestab` tab kind next to the builtin `files` page, so both guide capsules show ("Files" and "Filestab") and both page tabs can be open side by side. The built-in file browser is fully available: file opens (chat file chips, "Files changed" rows, the stock tree) route to the built-in file viewer, and filestab's selection is independent of it. Capturing those opens is a possible follow-up option (re-register the type to claim `dsh-resource://file/**` on the extension band).
+- Files view: restored pane state (the expanded set in localStorage) is normalized on load, and the live-update tick's targets are deduped — the tick's positional listing mapping stays aligned, so a re-opened pane shows the workspace root contents immediately.
+
 ## [0.1.6] - 2026-09-17
 
 - Files view: selecting a file now opens it as its CONTENT (preview for markdown, raw view otherwise) — never as a diff, even for a VCS-changed file (a deleted file still opens as its diff, which is its only view). Picking Diff explicitly is soft-sticky for the session: subsequent diffable selections also start in Diff until an explicit View/Preview pick, a session switch, or closing the Files view disarms it. The preference is in-memory only — a page reload drops it.

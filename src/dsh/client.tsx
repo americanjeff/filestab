@@ -43,7 +43,7 @@ const NS = "files";
 const TEXT_PREVIEW_CAP = 1024 * 1024;   // ~1 MB of text or markdown, shown in the pane
 
 const zh: Record<string, string> = {
-  "view.files": "文件", "view.workspace": "工作区", "files.showHidden": "显示隐藏文件", "files.items": "个项目",
+  "view.files": "文件", "view.filestab": "Filestab", "files.showHidden": "显示隐藏文件", "files.items": "个项目",
   "files.reload": "重新加载", "files.loading": "加载中…", "files.empty": "（空）", "files.truncated": "条目太多，只显示了一部分。",
   "files.fetchStuck": "目录请求未完成 —— 请点“重新加载”",
   "files.sessionGone": "会话已不可用（服务端重启或会话已结束）—— 点“重新加载”重试",
@@ -66,7 +66,7 @@ const zh: Record<string, string> = {
   "files.conflictNote": "存在未解决冲突（冲突标记在文件内容中可见）",
   "files.resizePanels": "拖动调整面板宽度（双击恢复默认）",
   "files.hideNav": "隐藏文件列表", "files.restoreNav": "恢复文件列表",
-  "files.guideTitle": "工作区文件", "files.guideDescription": "浏览会话工作区的文件",
+  "files.guideTitle": "Filestab", "files.guideDescription": "浏览会话工作区的文件",
   "files.refAdd": "把引用添加到聊天", "files.refCopy": "复制引用", "files.refCopied": "已复制", "files.copyPath": "复制路径", "files.openLocal": "在本地打开", "files.openFailed": "无法在桌面打开该文件",
   "files.ageNow": "刚刚", "files.ageMin": "{n} 分钟", "files.ageHour": "{n} 小时", "files.ageDay": "{n} 天",
   "files.type.png": "PNG 图像", "files.type.jpeg": "JPEG 图像", "files.type.gif": "GIF 图像",
@@ -83,7 +83,7 @@ const zh: Record<string, string> = {
   "files.externalFailed": "无法打开",
 };
 const en: Record<string, string> = {
-  "view.files": "Files", "view.workspace": "Workspace", "files.showHidden": "Show hidden files", "files.items": "items",
+  "view.files": "Files", "view.filestab": "Filestab", "files.showHidden": "Show hidden files", "files.items": "items",
   "files.reload": "Reload", "files.loading": "Loading…", "files.empty": "(empty)", "files.truncated": "Too many entries, showing only some of them.",
   "files.fetchStuck": "the list request did not complete — press Reload",
   "files.sessionGone": "session is no longer available (server restarted or session ended) — press Reload to retry",
@@ -106,7 +106,7 @@ const en: Record<string, string> = {
   "files.conflictNote": "unresolved conflict — markers visible in the file",
   "files.resizePanels": "Drag to resize the panels (double-click to reset)",
   "files.hideNav": "Hide file list", "files.restoreNav": "Restore file list",
-  "files.guideTitle": "Workspace files", "files.guideDescription": "Browse files in this session's workspace",
+  "files.guideTitle": "Filestab", "files.guideDescription": "Browse files in this session's workspace",
   "files.refAdd": "Add ref to chat", "files.refCopy": "Copy ref", "files.refCopied": "Copied", "files.copyPath": "Copy path", "files.openLocal": "Open locally", "files.openFailed": "couldn't open the file on the desktop",
   "files.ageNow": "now", "files.ageMin": "{n}m", "files.ageHour": "{n}h", "files.ageDay": "{n}d",
   "files.type.png": "PNG image", "files.type.jpeg": "JPEG image", "files.type.gif": "GIF image",
@@ -1138,7 +1138,10 @@ function loadState(sessionId: string | null): SavedState | null {
       ? (s.expanded as unknown[]).filter((p): p is string => typeof p === "string")
       : expandedFromPath(typeof s.path === "string" ? s.path : "");
     return {
-      expanded: expanded.includes(ROOT_PATH) ? expanded : [ROOT_PATH, ...expanded],
+      // Dedup: pre-fix saves wrote the root twice (see saveState); a
+      // duplicate in the restored set shifts the tick's positional listing
+      // mapping. The dedup is the in-place migration for those saves.
+      expanded: Array.from(new Set(expanded.includes(ROOT_PATH) ? expanded : [ROOT_PATH, ...expanded])),
       path: typeof s.path === "string" ? s.path : "",
       selected: typeof s.selected === "string" ? s.selected : null,
       navW: typeof s.navW === "number" ? s.navW : null,
@@ -1158,7 +1161,7 @@ function saveState(
   try {
     if (typeof localStorage === "undefined" || !sessionId) return;
     localStorage.setItem(STATE_KEY(sessionId), JSON.stringify({
-      expanded: [ROOT_PATH, ...expanded], selected: selected || null,
+      expanded: [...new Set([ROOT_PATH, ...expanded])], selected: selected || null,
       navW: typeof navW === "number" ? Math.round(navW) : null,
       rev: rev || null,
       collapsed: collapsed === true,
@@ -2699,13 +2702,12 @@ function listNavTarget(key: string, idx: number, n: number): number | null {
   return null;
 }
 
-// The right column is a dsh tab system: filestab's page (sidebar://files) is
-// one tab, and a file chip opens a SEPARATE resource tab (dsh-resource://file/…).
-// dsh keys each tab body by tab id, so switching the active tab unmounts the
-// old body and mounts the new one. filestab treats the resource tab as a
-// transient frame that redirects into the page, so a chip open runs: page
-// unmounts → transient frame → page remounts. React state is lost across that
-// remount, so the nav column re-fetches its tree — the visible "refresh".
+// The right column is a dsh tab system: filestab's page (sidebar://filestab)
+// is one tab, next to the stock `files` page and its per-file tabs. dsh keys
+// each tab body by tab id, and a body unmounts when its tab is hidden
+// (keepMounted defaults off), so any tab switch — to a stock file tab and
+// back — remounts the body. React state is lost across that remount, so the
+// nav column re-fetches its tree — the visible "refresh".
 //
 // This module-level cache (it survives the remount within one page load, keyed
 // by session) restores the fetched nav state synchronously on mount, so the
@@ -3223,8 +3225,15 @@ function FilesView(props: FilesViewProps) {
   // path is "", so "root ready" and "nothing ready" join to the same
   // string). The ref updates on every render; early ticks before the list
   // loads simply no-op (no request).
+  // Deduped: a restored expanded set can carry the root twice (pre-fix
+  // saves wrote [ROOT_PATH, ...expanded] over a set that already held it),
+  // and the host dedupes `dirs` too — the client maps the parallel
+  // `listings` onto `targets` POSITIONALLY, so one duplicate shifts every
+  // level below it up a slot (the root then shows its child's contents
+  // while the breadcrumb, read from the listing's own root field, still
+  // looks right).
   const tickTargetsRef = React.useRef<string[]>([]);
-  tickTargetsRef.current = expanded.filter((p) => levels[p] && levelErr[p] === undefined);
+  tickTargetsRef.current = Array.from(new Set(expanded.filter((p) => levels[p] && levelErr[p] === undefined)));
   // Monotonic sequence: a superseded tick's response must not apply.
   const tickSeqRef = React.useRef(0);
   React.useEffect(() => {
@@ -3834,22 +3843,30 @@ function FilesView(props: FilesViewProps) {
   </div>;
 }
 
-// ── Right column: the dsh sidebar-right takeover ───────────────────────────
-// filestab replaces the BUILTIN `files` tab type in the right column. The
-// registration takes the extension band — the documented way a type outside
-// the product claims a builtin's kind: the claims, the guide, and the body
-// and title seats (which the seat finds under THIS definition's id) go to
-// filestab until it unregisters, and the builtin resumes if it disappears.
-// The guide carries a SINGLE entry, so the column's first seed lands on the
-// files page directly (defaultSeed: the sole entry), not on a guide chain.
+// ── Right column: a sibling of the stock file browser ──────────────────────
+// filestab registers its OWN tab kind (`filestab`) NEXT TO the stock builtin
+// `files` page (dsh-client-ui-sidebar-files) and its `text` file viewer
+// (dsh-client-ui-sidebar-documentpreview). The registry's shadowing is per
+// KIND — one kind holds at most one in-force extension — so two
+// implementations coexist only under distinct kinds. The stock stack stays
+// fully intact: its guide capsule, its tree, and its one-tab-per-file opens
+// (`dsh-resource://file/…` claimed by the stock viewer on the fallback
+// band). Both guide capsules show, and both page tabs can be open at once.
 //
-// The builtin's one-tab-per-file behavior does NOT carry over: a
-// `dsh-resource://file/…` open (a chat file chip, a "Files changed" row) is
-// claimed by the patterns below, and its body is TRANSIENT — it re-opens the
-// page with {path, line} navigation params (the page tab dedupes within its
-// pane, so the single view is revealed and navigated) and then closes itself.
+// filestab is a PAGE type: no patterns, no claims. A file open (a chat file
+// chip, a "Files changed" row, the stock tree) routes to the stock viewer,
+// NOT here. Capturing those opens is a possible follow-up option: re-register
+// this type with patterns: ["dsh-resource://file/**"] (the extension band
+// outranks the stock fallback viewer) and the TRANSIENT FRAME below takes
+// over — it re-opens the page with {path, line} navigation params (the page
+// tab dedupes within its pane, so the single view is revealed and navigated)
+// and then closes itself.
+//
+// defaultSeed resolves the column's first page to the SOLE guide entry, or
+// the guide page when there are several: with the stock `files` entry
+// present, a fresh pane seeds on the guide, where both capsules sit.
 const FILESTAB_TAB_ID = "filestab";
-const FILES_KIND = "files";
+const FILESTAB_KIND = "filestab";   // its own kind — a sibling of the stock "files", not a shadow
 const FILE_ADDRESS_PREFIX = "dsh-resource://file/";
 
 interface ParsedFileAddress {
@@ -3920,9 +3937,10 @@ interface RightPaneBodyProps {
   inputActions?: { setDraft(text: string): void } | null;
 }
 
-// One tab of the `files` type. The page (`sidebar://files`) IS the single
-// files view: every file open in the column lands here as a navigation with
-// {path, line} params. A resource address is the transient frame: it
+// One tab of the `filestab` type. The page (`sidebar://filestab`) IS the
+// single filestab view: an openTab navigation with {path, line} params lands
+// here. A resource address — only reachable when this type CLAIMS them (the
+// capture option, see the section note) — is the transient frame: it
 // redirects into the page and closes itself, rendering nothing meanwhile.
 function RightPaneBody(props: RightPaneBodyProps) {
   const { tab } = props.useTabInfo();
@@ -3951,7 +3969,7 @@ function RightPaneBody(props: RightPaneBodyProps) {
     if (redirectKey === null || redirectedRef.current === redirectKey) return;
     redirectedRef.current = redirectKey;
     const line = params && typeof params.line === "number" ? params.line : undefined;
-    tab.actions.openTab(FILES_KIND, { params: { path: file!.path, ...(line !== undefined ? { line } : {}) } });
+    tab.actions.openTab(FILESTAB_KIND, { params: { path: file!.path, ...(line !== undefined ? { line } : {}) } });
     tab.actions.close();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [redirectKey]);
@@ -4056,16 +4074,18 @@ function apply(ctx: FilestabContext): void {
       inject: (sessionId: string | null) => browseFace(sessionId),
     }, FilesView));
   }
-  // The right-column takeover (see the section note above): register the
+  // The right-column sibling type (see the section note above): register the
   // type, then the keyed body that serves every tab of the kind.
   if (ctx.sidebarRightTabs) {
     ctx.effect(() => ctx.sidebarRightTabs!.register({
       id: FILESTAB_TAB_ID,
-      kind: FILES_KIND,
-      patterns: ["dsh-resource://file/**"],
-      priority: "extension",
-      canOpen: (address: string) => parseFileAddress(address) !== null,
-      title: (address: string) => parseFileAddress(address) ? fileAddressBasename(address) : t("view.workspace"),
+      kind: FILESTAB_KIND,
+      // A PAGE type: no patterns, no canOpen — the stock file viewer keeps
+      // every dsh-resource://file/… open (see the section note for the
+      // capture option). No priority either: the default extension band is
+      // the documented position of an out-of-product type, and there is no
+      // builtin on this kind to outrank.
+      title: (address: string) => parseFileAddress(address) ? fileAddressBasename(address) : t("view.filestab"),
       guide: [{
         order: 10,
         title: () => t("files.guideTitle"),

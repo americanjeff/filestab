@@ -358,6 +358,39 @@ assert.strictEqual(H.resolvePaneMode("diff", false, "notes.md"), "view", "an exp
 assert.strictEqual(findCls(view2, "dswFiles_extSection").length, 0, "no pins: the external band is absent");
 assert.strictEqual(findEl(view2, (n) => n.p && n.p["data-files-entry"] === "external").length, 0, "no pins: no external rows");
 assert.strictEqual(findEl(view2, (n) => n.p && n.p.className === "dswFiles_footerAction" && childText(n) === "files.openFile").length, 1, "the footer offers the manual open affordance");
+// Regression (the tick parallel-shift): the tick's `listings` array maps
+// POSITIONALLY onto the client's `targets`, and the host dedupes `dirs` — a
+// duplicate path in the restored expanded set shifts every level below it up
+// a slot (the root ends up showing its child's contents while the breadcrumb,
+// read from the listing's own root field, still looks correct). The root
+// cause was the save→load round-trip: saveState prepended the root to a set
+// that already held it, and the duplicate rode back in on every re-open.
+// Two guards: saveState never writes a duplicate root; loadState dedupes (the
+// in-place migration for pre-fix saves already in the field).
+{
+  const S = "sess-tick-dup";
+  const key = "filestab/files/" + S;
+  globalThis.localStorage.removeItem(key);
+  // The invariant expanded set (the root is always in it): saving must not
+  // duplicate the root.
+  H.saveState(S, ["", "src", "src/dsh"], "src/dsh/client.tsx", null, null, false, [], null);
+  const saved = JSON.parse(globalThis.localStorage.getItem(key));
+  assert.deepStrictEqual(saved.expanded, ["", "src", "src/dsh"], "saveState: the root appears exactly once");
+  // A pre-fix save (the root written twice) restores deduped.
+  globalThis.localStorage.setItem(key, JSON.stringify({
+    expanded: ["", "", "src", "src/dsh"], selected: "src/dsh/client.tsx",
+    navW: null, rev: null, collapsed: false, external: [], selectedExternal: null,
+  }));
+  const restored = H.loadState(S);
+  assert.deepStrictEqual(restored.expanded, ["", "src", "src/dsh"], "loadState: a pre-fix double-root save restores once (migration)");
+  assert.strictEqual(restored.selected, "src/dsh/client.tsx", "loadState: the selection survives the migration");
+  // A save missing the root still gets one.
+  globalThis.localStorage.setItem(key, JSON.stringify({
+    expanded: ["src"], selected: null, navW: null, rev: null, collapsed: false, external: [], selectedExternal: null,
+  }));
+  assert.deepStrictEqual(H.loadState(S).expanded, ["", "src"], "loadState: the root is restored for a rootless save");
+  globalThis.localStorage.removeItem(key);
+}
 delete globalThis.localStorage;
 
 // 8) Unified-diff parser (M2), table tests against the golden fixtures, which
@@ -1341,7 +1374,7 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
   assert.strictEqual(drafts[2], "hello @a.txt:2 ", "commit: a draft ending in whitespace → no double space");
 }
 
-// ---- Right-column takeover (the dsh sidebar-right replacement) ----
+// ---- Right-column sibling (filestab's own kind, next to the stock files page) ----
 {
   // A 0.1.5+ host: re-apply against a ctx WITH the column's tab registry.
   // The right-column face registers, and the conversation Files tab stays
@@ -1368,21 +1401,20 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
   mod.apply(ctxColumn);
   assert.strictEqual(registeredInColumnCtx, null, "0.1.5+ host: the conversation Files tab is NOT registered (the column is the surface)");
 
-  // The type registration: filestab claims the builtin's `files` kind on the
-  // extension band, recognizes file addresses, and keeps a SINGLE guide entry
-  // (defaultSeed's sole-entry rule: the column's first open seeds the files
-  // page directly, not a guide chain).
+  // The type registration: filestab owns its OWN kind — a sibling of the
+  // stock builtin `files` page, not a shadow. A PAGE type: no patterns and
+  // no canOpen (the stock file viewer keeps every dsh-resource://file/…
+  // open), one guide entry alongside the stock's (the column seeds on the
+  // guide page when there are several entries).
   assert.ok(tabDef, "right-column type registered");
   assert.strictEqual(tabDef.id, "filestab", "the id the body registers under");
-  assert.strictEqual(tabDef.kind, "files", "claims the builtin's kind");
-  assert.strictEqual(tabDef.priority, "extension", "the extension band outranks the builtin");
-  assert.deepStrictEqual(tabDef.patterns, ["dsh-resource://file/**"], "recognizes file addresses");
-  assert.strictEqual(tabDef.canOpen("dsh-resource://file/session/s1/a.txt"), true, "opens a session file address");
-  assert.strictEqual(tabDef.canOpen("dsh-resource://file/absolute/%2Ftmp/x"), false, "an absolute address is not this type's");
-  assert.strictEqual(tabDef.canOpen("sidebar://files"), false, "the page address is not a resource");
-  assert.strictEqual(tabDef.title("dsh-resource://file/session/s1/sub/a.txt"), "a.txt", "the resource chip shows the basename");
-  assert.strictEqual(tabDef.title("sidebar://files"), "view.workspace", "the page chip shows the Workspace label (fake t = identity)");
-  assert.strictEqual(tabDef.guide.length, 1, "a SINGLE guide entry → the column seeds on filestab");
+  assert.strictEqual(tabDef.kind, "filestab", "its own kind — a sibling of the stock 'files', no shadowing");
+  assert.strictEqual(tabDef.priority, undefined, "no builtin on this kind: the default (extension) band is implicit");
+  assert.strictEqual(tabDef.patterns, undefined, "no patterns: a page type — the stock viewer keeps file opens");
+  assert.strictEqual(tabDef.canOpen, undefined, "no veto: a page type recognizes no address");
+  assert.strictEqual(tabDef.title("dsh-resource://file/session/s1/sub/a.txt"), "a.txt", "the resource chip shows the basename (the capture option's path)");
+  assert.strictEqual(tabDef.title("sidebar://filestab"), "view.filestab", "the page chip shows the Filestab label (fake t = identity)");
+  assert.strictEqual(tabDef.guide.length, 1, "one guide entry for filestab's own kind (alongside the stock 'files' entry)");
   assert.strictEqual(typeof tabDef.guide[0].title, "function", "the guide title is thunked (locale-flip safe)");
   assert.strictEqual(typeof tabDef.guide[0].icon, "function", "the guide glyph is a component");
 
@@ -1404,12 +1436,12 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
     { scope: "session", sessionId: "s1", path: "a.txt" }, "address: the query suffix is ignored");
   assert.strictEqual(H.parseFileAddress("dsh-resource://file/session/s1"), null, "address: a pathless tail is not a file");
   assert.strictEqual(H.parseFileAddress("dsh-resource://file/absolute/%2Ftmp/x"), null, "address: absolute scope is not browsable here");
-  assert.strictEqual(H.parseFileAddress("sidebar://files"), null, "address: the page address is not a resource");
+  assert.strictEqual(H.parseFileAddress("sidebar://filestab"), null, "address: the page address is not a resource");
   assert.strictEqual(H.fileAddressBasename("dsh-resource://file/session/s1/sub/a b.txt"), "a b.txt", "basename decodes its segment");
 
   // The body's two lives: a resource open of THIS session's file renders the
   // files view (restored from the nav cache, so the pane doesn't flash blank)
-  // and redirects (openTab files {path, line}, then close); the page address
+  // and redirects (openTab filestab {path, line}, then close); the page address
   // renders the files view and navigates in place.
   const R = H.RightPaneBody;
   assert.strictEqual(typeof R, "function", "the body is exposed for test");
@@ -1435,14 +1467,14 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
   assert.deepStrictEqual(frame.p.openRequest, { path: "sub/a.txt", line: 7, revision: 1 }, "the frame derives its open request from the resource address");
   for (const fn of pendingEffects) fn();
   assert.deepStrictEqual(actions, [
-    ["openTab", "files", { params: { path: "sub/a.txt", line: 7 } }],
+    ["openTab", "filestab", { params: { path: "sub/a.txt", line: 7 } }],
     ["close"],
   ], "the redirect: the page takes the open, the frame closes");
 
   pendingEffects = [];
   actions.length = 0;
   const page = R({
-    useTabInfo: () => mkTab("sidebar://files", { path: "sub/a.txt", line: 7 }, 2),
+    useTabInfo: () => mkTab("sidebar://filestab", { path: "sub/a.txt", line: 7 }, 2),
     sessionId: "sess-x", ...rface, t: (k) => k,
   });
   assert.ok(page && typeof page.t === "function", "the page renders the files view (a FilesView element)");
@@ -1462,5 +1494,7 @@ const fx = (name) => readFileSync(fileURLToPath(new URL("./fixtures/diffs/" + na
   for (const fn of pendingEffects) fn();
   assert.deepStrictEqual(actions, [], "no redirect actions for another session's file");
 }
+
+
 
 console.log("client: bundle + apply + inject-face + render + diff parser/view + right-column OK");

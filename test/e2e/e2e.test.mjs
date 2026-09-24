@@ -2,9 +2,11 @@
 // driven by a real headless browser (playwright-core + a playwright chromium).
 //
 // Scope: the Files view journeys J1, J1.2, J3, J4, J5, J6, J7, J8, J19, J20 (each
-// defined by its section header below). On 0.1.5 the Files view is the dsh RIGHT PANE
-// (filestab serves the files slot; the conversation area has no Files tab), so
-// openSession opens that pane via the host's own expand button.
+// defined by its section header below). On 0.1.5+ the Files view is the dsh RIGHT
+// PANE (the conversation area has no Files tab), so openSession opens that pane via
+// the host's own expand button. filestab registers its OWN "filestab" tab kind
+// alongside the stock "files" page (sibling mode), so the pane seeds on the guide
+// page and clickFilesTab picks the Filestab capsule.
 // The workspace picker and the send-a-message session flow are dsh's own UI;
 // here they are automation helpers, not code under test.
 //
@@ -238,9 +240,10 @@ async function openSession(browser, { url, workspace }) {
     // (the conversation area no longer registers a Files tab). The first turn
     // builds the conversation pane; the right pane is collapsed and is opened
     // by the host's own expand button in the conversation header corner.
-    // filestab serves the files slot, so opening the pane lands on the Files
-    // view directly. Poll (evaluate, not waitForFunction) to dodge the
-    // arg/options positional trap.
+    // Sibling mode: the pane seeds on the GUIDE page (the stock "files" entry
+    // and filestab's), so clickFilesTab clicks the Filestab capsule after the
+    // expand. Poll (evaluate, not waitForFunction) to dodge the arg/options
+    // positional trap.
     console.log(`openSession(${workspace.split("/").pop()}): hello sent, waiting for the conversation + right-pane expand button`);
     const t0 = Date.now();
     for (;;) {
@@ -267,10 +270,14 @@ async function openSession(browser, { url, workspace }) {
   return session;
 }
 
-// 0.1.5: there is no conversation Files tab — openSession opened the right
-// pane (filestab serves the files slot), so the Files view is already the
-// pane's content. Just wait for it to be visible.
+// 0.1.5+: there is no conversation Files tab — openSession opened the right
+// pane. Sibling mode: the pane seeds on the guide page (two entries), so open
+// the Filestab capsule (the guide buttons carry the contributing kind as
+// data-sidebar-right-guide-entry); if a host ever seeds the page directly
+// (the capsule absent), the root is already up.
 async function clickFilesTab(page) {
+  const cap = page.locator('[data-sidebar-right-guide-entry="filestab"]');
+  if (await cap.count()) await cap.first().click();
   await page.locator(".dswFiles_root").waitFor({ state: "visible", timeout: 20_000 });
 }
 

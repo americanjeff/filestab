@@ -5,7 +5,7 @@
 
 English | [中文](README.zh.md)
 
-A replacement file viewer with vcs support for [DeepSeek Harness](https://github.com/deepseek-ai/dsh) ![DeepSeek logo](assets/icons/deepseek.png)
+A VCS-aware file viewer for [DeepSeek Harness](https://github.com/deepseek-ai/dsh) — its own "Filestab" tab in the right column, alongside the built-in file browser ![DeepSeek logo](assets/icons/deepseek.png)
 
 ## Features
 

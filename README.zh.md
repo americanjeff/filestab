@@ -5,7 +5,7 @@
 
 [English](README.md) | 中文
 
-[DeepSeek Harness](https://github.com/deepseek-ai/dsh) 的替换文件查看器（支持版本控制）![DeepSeek 标志](assets/icons/deepseek.png)
+[DeepSeek Harness](https://github.com/deepseek-ai/dsh) 的 VCS 文件查看器——右侧栏中独立的 "Filestab" 标签页，与内置文件浏览器并存 ![DeepSeek 标志](assets/icons/deepseek.png)
 
 ## 功能
 
